@@ -8,4 +8,7 @@ Cargo.lock.orig
 *.pcapng
 /captures/
 
+# Local Sunshine server (GPLv3) — interop host, NEVER committed to this repo.
+/.sunshine/
+
 .DS_Store

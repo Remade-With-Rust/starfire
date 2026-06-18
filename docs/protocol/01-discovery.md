@@ -58,14 +58,32 @@ known-hosts/
         persisted                          → §02 pair  → §03 serverinfo (mTLS)
 ```
 
+## Status (F1)
+
+- ✅ **Manual host entry** — `HostAddress::parse` (`host`, `host:port`, `[v6]`,
+  `[v6]:port`), unit-tested.
+- ✅ **Reachability / pair-status probe** — `discovery::probe` does a std-only
+  HTTP `GET /serverinfo` (no TLS dep for the unauthenticated port) and parses it
+  via [`serverinfo`](03-serverinfo-and-negotiation.md). Live-validated below.
+- ☐ **mDNS `_nvstream._tcp` browse** — still TODO; needs a Windows capture
+  mechanism (npcap/Wireshark) to freeze the mDNS fixture before implementing.
+- ☐ **Per-entry host persistence** (cert/identity store) — F2-adjacent.
+
+## Live-validation note
+- **2026-06-18** — `probe(127.0.0.1)` against local Sunshine 2026.516.143833
+  succeeded (`pair_status=0`). Test: `discovery::tests::live_probe_localhost`
+  (`#[ignore]`, run with `-- --ignored`).
+
 ## Tests
 
-- **Fixture:** captured mDNS response + unauthenticated `/serverinfo` XML.
-- **Golden:** parse fixture → assert host fields + pair-status.
-- **Live:** discover the real gaming-VM host; dated note here.
+- **Unit:** `HostAddress::parse` forms; `parse_http_response` status/body split.
+- **Golden:** the `/serverinfo` body parse — see
+  [`03`](03-serverinfo-and-negotiation.md).
+- **Live (ignored):** `probe` against a running host.
 
 ## Open / to-confirm
 
 - [ ] Exact `_nvstream._tcp` TXT record keys. **[CAPTURE-LOCKED]**
-- [ ] IPv6 behavior and link-local handling.
-- [ ] Whether the HTTPS port is always advertised or assumed base+(-5).
+- [ ] IPv6 behavior and link-local handling (parse handles the literal forms).
+- [x] HTTPS port: advertised explicitly as `<HttpsPort>` (= 47984 observed), not
+  assumed — confirmed from capture.

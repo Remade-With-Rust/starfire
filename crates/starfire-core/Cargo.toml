@@ -16,8 +16,9 @@ test-helpers = []
 [dependencies]
 thiserror = { workspace = true }
 tracing = { workspace = true }
-# Protocol-layer deps are added as each layer lands (docs/05-build-plan.md):
-#   reed-solomon-erasure, aes, aes-gcm, sha2, quick-xml, rusty_enet, rcgen, rustls…
+quick-xml = { workspace = true } # /serverinfo + /applist GameStream XML (F1, F3, F4)
+# Further protocol-layer deps are added as each layer lands (docs/05-build-plan.md):
+#   reed-solomon-erasure, aes, aes-gcm, sha2, rusty_enet, rcgen, rustls…
 
 [dev-dependencies]
 starfire-testkit = { path = "../starfire-testkit" }

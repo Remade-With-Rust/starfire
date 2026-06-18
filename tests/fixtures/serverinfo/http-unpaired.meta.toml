@@ -1,0 +1,4 @@
+sunshine_version = "2026.516.143833"
+captured = "2026-06-18"
+layer = "serverinfo/http-unpaired"
+notes = "GET http://localhost:47989/serverinfo, unpaired (PairStatus=0). Redacted: <hostname> and <uniqueid> replaced with neutral values (PII); all protocol fields verbatim. Host has no AV1 encoder: ServerCodecModeSupport=1573633 (0x180301) does NOT set the assumed AV1 bit 0x40000 — see docs/protocol/03."

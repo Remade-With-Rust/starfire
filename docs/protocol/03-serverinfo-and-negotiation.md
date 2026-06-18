@@ -1,7 +1,36 @@
 # Protocol 03 — Server Capabilities & Negotiation
 
-> Provenance: observation against Sunshine vX.Y. Clean-room. XML element names and
-> flag bits are **[CAPTURE-LOCKED]** to a verbatim `/serverinfo` fixture.
+> Provenance: observation against **Sunshine 2026.516.143833**. Clean-room. XML
+> element names are now **pinned to a real capture**
+> ([`tests/fixtures/serverinfo/http-unpaired.bin`](../../tests/fixtures/serverinfo/http-unpaired.bin))
+> and golden-tested; flag *bit positions* remain **[CAPTURE-LOCKED]**.
+
+## Live-validation note
+- **2026-06-18** — `GET http://127.0.0.1:47989/serverinfo` against local Sunshine
+  2026.516.143833 parsed end-to-end by `starfire_core::discovery::probe`
+  (`pair_status=0`, `state=SUNSHINE_SERVER_FREE`). Fixture committed + golden test
+  `serverinfo::tests::parses_real_unpaired_serverinfo_fixture`.
+
+## Real captured schema (HTTP, unpaired)
+The unauthenticated `/serverinfo` returns a flat `<root status_code="200">` with
+these elements (verbatim names):
+
+```
+hostname, appversion, GfeVersion, uniqueid, HttpsPort, ExternalPort,
+MaxLumaPixelsHEVC, mac, LocalIP, ServerCodecModeSupport, PairStatus,
+currentgame, state
+```
+
+> The HTTP/unpaired document is a **subset**. The richer capability set
+> (resolution/FPS ceilings, display modes, HDR/surround) is expected only from
+> the **authenticated HTTPS** `/serverinfo` after pairing — capture that in F3.
+
+### ⚠️ ServerCodecModeSupport — methodology win
+The readme assumed **AV1 = `0x40000`**. The real value captured here is
+**`1573633` = `0x180301`**, which does **not** set `0x40000` (this host has no
+AV1 encoder). So `0x40000` as the AV1 bit is **unverified** and must be re-derived
+against a host that advertises AV1. The golden test asserts the AV1 bit is unset
+on this capture, so the codebase can't silently rely on the wrong constant.
 
 ## Goal
 

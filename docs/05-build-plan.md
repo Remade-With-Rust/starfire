@@ -61,7 +61,14 @@ codebase, not this repo).
 ## Phase 1 — Interactive E2E demo (~3–5 weeks)
 *One codec (AV1), Mac first, basic input, minimal FEC. The thin vertical slice.*
 
-- F1, F2 (pairing/pre-provision), F3, F4 — get to a launched session.
+> **Local Sunshine host stood up** (portable 2026.516.143833, gitignored under
+> `.sunshine/`) — protocol layers now live-validate against a real server.
+
+- 🟡 **F1 in progress:** ✅ manual host + `/serverinfo` probe + parser, golden-
+  tested against a real capture and live-validated; ☐ mDNS browse (needs a
+  Windows packet-capture tool); ☐ host persistence. See
+  [`protocol/01`](protocol/01-discovery.md), [`protocol/03`](protocol/03-serverinfo-and-negotiation.md).
+- F2 (pairing/pre-provision), F3, F4 — get to a launched session.
 - F5 (RTSP) → extract crypto + ports + FEC params.
 - F6 (ENet control up + AES-GCM; keepalive + IDR request).
 - F7 (RTP video happy path → AV1 OBUs).
