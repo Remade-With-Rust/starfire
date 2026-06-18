@@ -17,8 +17,14 @@ test-helpers = []
 thiserror = { workspace = true }
 tracing = { workspace = true }
 quick-xml = { workspace = true } # /serverinfo + /applist GameStream XML (F1, F3, F4)
+sha2 = { workspace = true }      # pairing PIN KDF + challenge hash chain (F2)
+aes = { workspace = true }       # AES-128-ECB pairing challenge cipher (F2)
+rcgen = { workspace = true }     # self-signed client identity cert (F2)
+getrandom = { workspace = true } # OS randomness for salt/challenge/secret (F2)
+p256 = { workspace = true }      # ECDSA sign of the pairing secret (F2)
+x509-parser = { workspace = true } # extract X.509 signature bytes (F2)
 # Further protocol-layer deps are added as each layer lands (docs/05-build-plan.md):
-#   reed-solomon-erasure, aes, aes-gcm, sha2, rusty_enet, rcgen, rustls…
+#   reed-solomon-erasure, aes-gcm, rusty_enet, rcgen, rsa, x509-parser, rustls…
 
 [dev-dependencies]
 starfire-testkit = { path = "../starfire-testkit" }

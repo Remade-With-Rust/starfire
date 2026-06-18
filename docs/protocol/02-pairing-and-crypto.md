@@ -1,9 +1,44 @@
 # Protocol 02 — Pairing & Crypto
 
-> Provenance: observation against Sunshine vX.Y. Clean-room. The byte layouts and
-> hash chain here are **[CAPTURE-LOCKED]**; the authoritative form is the
-> committed fixtures + known-answer crypto vectors
-> ([`../03-bitexact-methodology.md`](../03-bitexact-methodology.md)).
+> Provenance: derived from the public GameStream pairing protocol; **validated by
+> successful live pairing against Sunshine 2026.516.143833** (success is the
+> proof). Clean-room — no Moonlight source consulted.
+
+## ✅ Status — pairing works end-to-end (F2)
+Implemented in `starfire_core::pairing` and confirmed by `live_pair_full`
+(2026-06-18): a fresh client identity pairs through all four HTTP phases and the
+host lists it as a trusted client.
+
+**Confirmed against the live host:**
+- **Client cert: ECDSA P-256 is accepted** (we do *not* need RSA-2048). The cert
+  is sent as hex of its PEM in `getservercert`.
+- **PIN KDF + cipher:** `aes_key = SHA-256(salt ‖ pin_ascii)[..16]`, used as
+  **AES-128-ECB**. The `clientchallenge` response is exactly **48 bytes**
+  (`server_response[32] ‖ server_challenge[16]`), confirming SHA-256 + the layout.
+- **Hash chain (phase 3):**
+  `SHA-256(server_challenge ‖ client_cert_signature ‖ client_secret)` — accepted.
+- **Signature (phase 4):** ECDSA-P256/SHA-256 over `client_secret`, **DER-encoded**
+  — accepted. `client_cert_signature` is the X.509 `signatureValue` of our cert.
+- **`getservercert` blocks** until a PIN is entered on the host → auto-PIN must be
+  submitted concurrently (we POST `/api/pin` on the web UI port).
+- **Verification gotcha:** over plain HTTP `/serverinfo` `PairStatus` is **always
+  0** (no mTLS → host can't identify us). The real signal is the host's trusted
+  -clients list (or HTTPS-mTLS `/serverinfo`, coming with F3).
+
+### Live-validation note
+- **2026-06-18** — `pairing::ladder::tests::live_pair_full` paired a fresh
+  identity against local Sunshine 2026.516.143833; `/api/clients/list` then listed
+  it as `enabled:true`. Crypto unit-tested with the FIPS-197 AES-128 vector.
+
+> Remaining test debt: a **deterministic request-encoding golden** (fixed test
+> identity + fixed salt/challenge/secret → exact `/pair` query strings) to guard
+> the encoder in CI. The live test proves correctness today; the golden guards
+> regressions.
+
+---
+
+> The byte layouts below are now confirmed where the status section says so; items
+> still marked **[CAPTURE-LOCKED]** are unconfirmed.
 
 This doc owns **all client crypto**: pairing identity, the PIN challenge, and the
 session-key material that downstream control/input/media planes consume.

@@ -17,6 +17,7 @@
 //! so it has a uniform golden-test surface (docs/03-bitexact-methodology.md).
 
 pub mod error;
+pub mod hex;
 pub mod wire;
 
 pub mod audio;

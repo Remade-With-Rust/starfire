@@ -30,6 +30,10 @@ sha2 = "0.10"
 aes = "0.8"
 aes-gcm = "0.10"
 quick-xml = "0.36"
+rcgen = "0.13"     # self-signed client identity cert (F2)
+getrandom = "0.2"  # OS randomness for salt/challenge/secret (F2)
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] } # sign pairing secret (F2)
+x509-parser = "0.16" # extract X.509 cert signature bytes for the hash chain (F2)
 # test support
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
