@@ -543,4 +543,76 @@ mod tests {
 
         client.cancel().expect("cancel");
     }
+
+    /// Pair + finalize against the local test host, returning an authenticated
+    /// client. Shared by the F4/F5 live tests.
+    fn pair_and_finalize() -> crate::launch::PairedClient {
+        use crate::https::{cert_pem_to_der, HttpsClient};
+        use crate::launch::PairedClient;
+
+        curl(&[
+            "-X",
+            "POST",
+            "https://localhost:47990/api/clients/unpair-all",
+        ]);
+        let pin = "1234";
+        let id = ClientIdentity::generate("starfire-test").unwrap();
+        let cert = id.cert_pem.clone();
+        let key = id.key_pem.clone();
+        let salt = random_bytes::<16>().unwrap();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(800));
+            submit_pin_via_curl(pin);
+        });
+        let pairing = PairingClient::new("127.0.0.1", 47989, id);
+        let host_pem = pairing.pair(&salt, pin).expect("pair");
+        let _ = t.join();
+        let der = cert_pem_to_der(&host_pem).unwrap();
+        let https = HttpsClient::new(&cert, &key, Some(der)).unwrap();
+        pairing.pair_challenge(&https, 47984).unwrap();
+        let uid = pairing.identity.unique_id.clone();
+        PairedClient::new(https, "127.0.0.1", 47984, &uid)
+    }
+
+    /// Live F5: pair, launch, then run the full RTSP handshake and assert the
+    /// stream ports come back. Captures the DESCRIBE SDP fixture. Run with
+    /// `-- --ignored live_rtsp_handshake --nocapture`.
+    #[test]
+    #[ignore = "requires a running Sunshine host + web API"]
+    fn live_rtsp_handshake() {
+        use crate::launch::LaunchConfig;
+        use crate::rtsp::RtspClient;
+
+        let client = pair_and_finalize();
+        let apps = client.applist().expect("applist");
+        let desktop = apps.iter().find(|a| a.title == "Desktop").expect("Desktop");
+        let session = client
+            .launch(&desktop.id, &LaunchConfig::default())
+            .expect("launch");
+        println!("rtsp url: {}", session.rtsp_url);
+
+        let mut rtsp = RtspClient::new(&session.rtsp_url, Duration::from_secs(10)).expect("client");
+
+        // Capture the DESCRIBE SDP for the golden test before the full handshake.
+        let desc = rtsp
+            .request("DESCRIBE", None, &[("X-GS-ClientVersion", "14")], b"")
+            .expect("DESCRIBE");
+        let base = format!("{}/../../tests/fixtures", env!("CARGO_MANIFEST_DIR"));
+        std::fs::create_dir_all(format!("{base}/rtsp")).ok();
+        std::fs::write(format!("{base}/rtsp/describe-sdp.bin"), &desc.body).unwrap();
+
+        // Fresh client (CSeq restarts) for the real handshake.
+        let mut rtsp =
+            RtspClient::new(&session.rtsp_url, Duration::from_secs(10)).expect("client2");
+        let rs = rtsp.handshake().expect("rtsp handshake");
+        println!("session: {rs:?}");
+        assert_eq!(rs.ports.video_port, 47998);
+        assert_eq!(rs.ports.audio_port, 48000);
+        assert_eq!(rs.ports.control_port, 47999);
+        assert!(!rs.session_id.is_empty());
+        assert!(!rs.ping_payload.is_empty());
+        assert!(rs.sdp.encryption_required());
+
+        client.cancel().ok();
+    }
 }

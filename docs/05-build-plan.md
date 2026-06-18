@@ -85,8 +85,15 @@ codebase, not this repo).
   returns the **RTSP URL** (`rtsp://host:48010`) + the RI session key — feeding F5.
   Golden-tested against captured `/applist` + `/launch` fixtures (`live_launch`).
   See [`protocol/04`](protocol/04-applist-and-launch.md).
-- **F5 next** — RTSP `OPTIONS/DESCRIBE/SETUP/ANNOUNCE/PLAY` on the launched
-  session URL → extract per-stream ports + crypto + FEC params.
+- ✅ **F5 RTSP handshake works live:** `RtspClient::handshake()` walks
+  `OPTIONS → DESCRIBE → SETUP×3 → PLAY` and returns `RtspSession` — stream ports
+  (video 47998 / control 47999 / audio 48000), session id, ping payload, ENet
+  connect data, and the SDP encryption flags. `live_rtsp_handshake` + golden SDP
+  test. Quirks: one-request-per-connection, no Content-Length, X-GS-ClientVersion
+  required, ANNOUNCE optional. **Host requests media encryption** (`encryptionRequested:1`).
+  See [`protocol/05`](protocol/05-rtsp.md).
+- **F6 next** — ENet control channel (UDP 47999): connect with `X-SS-Connect-Data`,
+  AES-GCM with the RI key, keepalive + IDR request. The ping payload opens the path.
 - F5 (RTSP) → extract crypto + ports + FEC params.
 - F6 (ENet control up + AES-GCM; keepalive + IDR request).
 - F7 (RTP video happy path → AV1 OBUs).

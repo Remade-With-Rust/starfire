@@ -1,8 +1,44 @@
 # Protocol 05 — RTSP Stream Setup
 
-> Provenance: observation against Sunshine vX.Y. Clean-room. RTSP on **TCP 48010**
-> is plaintext in capture — the easiest layer to freeze verbatim. Method order,
-> header names, and SDP grammar are **[CAPTURE-LOCKED]** to fixtures.
+> Provenance: observation against **Sunshine 2026.516.143833**. Clean-room. RTSP
+> on **TCP 48010** is plaintext. Validated by a live handshake returning the
+> stream binding.
+
+## ✅ Status — RTSP handshake works live (F5)
+`starfire_core::rtsp::{RtspClient, RtspSession}` walks the exchange and returns
+everything the media planes need. Confirmed by `live_rtsp_handshake` + golden test.
+
+### Live-validation note
+- **2026-06-18** — `OPTIONS → DESCRIBE → SETUP×3 → PLAY` against local Sunshine
+  returned: ports video=47998, audio=48000, control=47999; `Session=DEADBEEFCAFE`;
+  `X-SS-Ping-Payload` (8 bytes); `X-SS-Connect-Data`; `PLAY` → 200. SDP fixture:
+  `tests/fixtures/rtsp/describe-sdp.bin`.
+
+### Sunshine RTSP quirks (confirmed)
+- **One request per TCP connection** — the host closes after each response;
+  `RtspClient` opens a fresh socket per request (CSeq still increments globally).
+- **No `Content-Length`** on responses — body runs to connection close (read to EOF).
+- **`X-GS-ClientVersion`** header required, else the host RSTs the connection.
+- **ANNOUNCE is not required** — `PLAY` after SETUP returns 200; the host uses the
+  `/launch` config. A minimal ANNOUNCE got a clean 400.
+
+### The handshake
+| Step | Request | Yields |
+|------|---------|--------|
+| OPTIONS | `OPTIONS rtsp://host:48010` | liveness (`CSeq` only) |
+| DESCRIBE | + `Accept` | SDP: `x-ss-general.{featureFlags,encryptionSupported,encryptionRequested}`, `sprop-parameter-sets`, `fmtp:97 surround-params` |
+| SETUP×3 | `…/streamid={audio,video,control}` + `Transport: unicast;X-GS-ClientPort=…` | `Transport: server_port=<n>`, `Session`, `X-SS-Ping-Payload` (a/v), `X-SS-Connect-Data` (control) |
+| PLAY | + `Session` | 200 → host ready to stream |
+
+### ⚠️ Media encryption — key finding for F6/F7
+The DESCRIBE SDP advertises **`encryptionRequested:1`** (supported `:5`). The host
+requests media encryption (AES-GCM, RI key from `/launch`). The exact bit→stream
+mapping + nonce/IV are **[CAPTURE-LOCKED]**, resolved when control/video land.
+
+### Still ahead (with F6/F7)
+- The **ping payload** must be sent to each media UDP port to open the return path.
+- The **`X-SS-Connect-Data`** seeds the ENet control connect.
+- `surround-params` / `sprop-parameter-sets` decode for audio layout + video config.
 
 ## Goal
 

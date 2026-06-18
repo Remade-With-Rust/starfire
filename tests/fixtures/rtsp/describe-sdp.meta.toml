@@ -1,0 +1,4 @@
+sunshine_version = "2026.516.143833"
+captured = "2026-06-18"
+layer = "rtsp/describe-sdp"
+notes = "RTSP DESCRIBE response body (custom attribute-only SDP) over TCP 48010 after launch. Carries x-ss-general flags (featureFlags=3, encryptionSupported=5, encryptionRequested=1), sprop-parameter-sets (video config), and fmtp:97 surround-params (audio layouts). No PII."
