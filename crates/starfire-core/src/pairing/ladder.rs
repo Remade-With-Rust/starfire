@@ -7,7 +7,6 @@
 //! Built bottom-up: phase 1 (`getservercert`, no PIN) lands first to confirm the
 //! host accepts our cert; the PIN-keyed phases follow.
 
-use std::collections::BTreeMap;
 use std::time::Duration;
 
 use crate::discovery::http_get;
@@ -210,9 +209,9 @@ impl PairingClient {
 
 /// Parse a `/pair` response envelope, hex-decoding the binary fields.
 pub fn parse_pair_response(xml: &[u8]) -> crate::Result<PairResponse> {
-    let (status_code, fields) = leaf_fields(xml)?;
+    let f = crate::xml::parse_flat(xml)?;
     let decode = |k: &str| -> crate::Result<Option<Vec<u8>>> {
-        match fields.get(k) {
+        match f.get(k) {
             Some(v) => {
                 Ok(Some(hex::decode(v).map_err(|e| {
                     crate::Error::Protocol(format!("/pair {k}: {e}"))
@@ -222,62 +221,12 @@ pub fn parse_pair_response(xml: &[u8]) -> crate::Result<PairResponse> {
         }
     };
     Ok(PairResponse {
-        status_code,
-        paired: fields.get("paired").map(|v| v == "1").unwrap_or(false),
+        status_code: f.status_code,
+        paired: f.get("paired") == Some("1"),
         plaincert: decode("plaincert")?,
         challenge_response: decode("challengeresponse")?,
         pairing_secret: decode("pairingsecret")?,
     })
-}
-
-/// Extract `<root status_code>` + a tag→text map of leaf elements. Shared XML
-/// shape with `/serverinfo` (docs/protocol/03).
-fn leaf_fields(xml: &[u8]) -> crate::Result<(Option<u16>, BTreeMap<String, String>)> {
-    use quick_xml::events::Event;
-    use quick_xml::Reader;
-
-    let mut reader = Reader::from_reader(xml);
-    let mut buf = Vec::new();
-    let mut stack: Vec<String> = Vec::new();
-    let mut fields = BTreeMap::new();
-    let mut status_code = None;
-
-    loop {
-        match reader
-            .read_event_into(&mut buf)
-            .map_err(|e| crate::Error::Protocol(format!("/pair XML: {e}")))?
-        {
-            Event::Start(e) => {
-                let name = String::from_utf8_lossy(e.name().into_inner()).to_string();
-                if name == "root" {
-                    status_code = e
-                        .attributes()
-                        .flatten()
-                        .find(|a| a.key.into_inner() == b"status_code")
-                        .and_then(|a| std::str::from_utf8(a.value.as_ref()).ok()?.parse().ok());
-                }
-                stack.push(name);
-            }
-            Event::Text(e) => {
-                let text = e
-                    .unescape()
-                    .map_err(|e| crate::Error::Protocol(format!("/pair XML text: {e}")))?;
-                let trimmed = text.trim();
-                if !trimmed.is_empty() {
-                    if let Some(cur) = stack.last() {
-                        fields.insert(cur.clone(), trimmed.to_string());
-                    }
-                }
-            }
-            Event::End(_) => {
-                stack.pop();
-            }
-            Event::Eof => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-    Ok((status_code, fields))
 }
 
 #[cfg(test)]
@@ -467,5 +416,131 @@ mod tests {
             Some(1),
             "mTLS /serverinfo should report paired"
         );
+    }
+
+    /// F4 exploration: pair, then dump the real `/applist` and a `/launch`
+    /// attempt so we can read the exact XML + params. Prints, asserts little.
+    /// Run with `-- --ignored live_explore_applist_launch --nocapture`.
+    #[test]
+    #[ignore = "requires a running Sunshine host + web API on 47984/47989/47990"]
+    fn live_explore_applist_launch() {
+        use crate::https::{cert_pem_to_der, HttpsClient};
+
+        curl(&[
+            "-X",
+            "POST",
+            "https://localhost:47990/api/clients/unpair-all",
+        ]);
+        let pin = "1234";
+        let id = ClientIdentity::generate("starfire-test").unwrap();
+        let cert = id.cert_pem.clone();
+        let key = id.key_pem.clone();
+        let salt = random_bytes::<16>().unwrap();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(800));
+            submit_pin_via_curl(pin);
+        });
+        let client = PairingClient::new("127.0.0.1", 47989, id);
+        let host_pem = client.pair(&salt, pin).expect("pair");
+        let _ = t.join();
+        let der = cert_pem_to_der(&host_pem).unwrap();
+        let https = HttpsClient::new(&cert, &key, Some(der)).unwrap();
+        client.pair_challenge(&https, 47984).unwrap();
+        let uid = client.identity.unique_id.clone();
+
+        let applist = https
+            .get(
+                "127.0.0.1",
+                47984,
+                &format!("/applist?uniqueid={uid}"),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        println!("===== APPLIST ({}) =====", applist.status);
+        println!("{}", String::from_utf8_lossy(&applist.body));
+
+        // Parse the first App's <ID> out of the applist body.
+        let body = String::from_utf8_lossy(&applist.body);
+        let appid = body
+            .split("<ID>")
+            .nth(1)
+            .and_then(|s| s.split("</ID>").next())
+            .unwrap_or("0")
+            .to_string();
+        println!("using appid={appid}");
+
+        let rikey = crate::hex::encode(&random_bytes::<16>().unwrap());
+        let launch_path = format!(
+            "/launch?uniqueid={uid}&appid={appid}&mode=1920x1080x60&additionalStates=1&sops=0\
+             &rikey={rikey}&rikeyid=12345&localAudioPlayMode=0&surroundAudioInfo=196610\
+             &remoteControllersBitmap=0&gcmap=0&hdrMode=0"
+        );
+        let launch = https
+            .get("127.0.0.1", 47984, &launch_path, Duration::from_secs(15))
+            .unwrap();
+        println!("===== LAUNCH ({}) =====", launch.status);
+        println!("{}", String::from_utf8_lossy(&launch.body));
+
+        // Tidy up so we don't leave a session running.
+        let cancel = https
+            .get(
+                "127.0.0.1",
+                47984,
+                &format!("/cancel?uniqueid={uid}"),
+                Duration::from_secs(5),
+            )
+            .map(|r| r.status);
+        println!("===== CANCEL = {cancel:?} =====");
+    }
+
+    /// Live F4: pair, then drive the real `PairedClient` — applist, launch (assert
+    /// an RTSP URL comes back), cancel. Run with
+    /// `-- --ignored live_launch --nocapture`.
+    #[test]
+    #[ignore = "requires a running Sunshine host + web API on 47984/47989/47990"]
+    fn live_launch() {
+        use crate::https::{cert_pem_to_der, HttpsClient};
+        use crate::launch::{LaunchConfig, PairedClient};
+
+        curl(&[
+            "-X",
+            "POST",
+            "https://localhost:47990/api/clients/unpair-all",
+        ]);
+        let pin = "1234";
+        let id = ClientIdentity::generate("starfire-test").unwrap();
+        let cert = id.cert_pem.clone();
+        let key = id.key_pem.clone();
+        let salt = random_bytes::<16>().unwrap();
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(800));
+            submit_pin_via_curl(pin);
+        });
+        let pairing = PairingClient::new("127.0.0.1", 47989, id);
+        let host_pem = pairing.pair(&salt, pin).expect("pair");
+        let _ = t.join();
+        let der = cert_pem_to_der(&host_pem).unwrap();
+        let https = HttpsClient::new(&cert, &key, Some(der)).unwrap();
+        pairing.pair_challenge(&https, 47984).unwrap();
+        let uid = pairing.identity.unique_id.clone();
+
+        let client = PairedClient::new(https, "127.0.0.1", 47984, &uid);
+        assert_eq!(client.server_info().unwrap().pair_status, Some(1));
+
+        let apps = client.applist().expect("applist");
+        println!("apps: {apps:?}");
+        let desktop = apps
+            .iter()
+            .find(|a| a.title == "Desktop")
+            .expect("Desktop app");
+
+        let session = client
+            .launch(&desktop.id, &LaunchConfig::default())
+            .expect("launch");
+        println!("session: {session:?}");
+        assert!(session.rtsp_url.starts_with("rtsp://"));
+        assert!(session.game_session);
+
+        client.cancel().expect("cancel");
     }
 }

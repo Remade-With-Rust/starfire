@@ -1,0 +1,4 @@
+sunshine_version = "2026.516.143833"
+captured = "2026-06-18"
+layer = "applist"
+notes = "GET https://localhost:47984/applist?uniqueid=<id> over mTLS, paired. Two default apps (Desktop, Steam Big Picture). App IDs are host-assigned; no PII."

@@ -1,0 +1,4 @@
+sunshine_version = "2026.516.143833"
+captured = "2026-06-18"
+layer = "launch"
+notes = "GET https://localhost:47984/launch?...&appid=881448767&mode=1920x1080x60&rikey=<hex>&rikeyid=<int>&... over mTLS. Success: sessionUrl0 = the RTSP URL for F5; gamesession=1. No PII (loopback URL)."
