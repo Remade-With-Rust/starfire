@@ -21,9 +21,14 @@ host lists it as a trusted client.
   — accepted. `client_cert_signature` is the X.509 `signatureValue` of our cert.
 - **`getservercert` blocks** until a PIN is entered on the host → auto-PIN must be
   submitted concurrently (we POST `/api/pin` on the web UI port).
+- **Phase 5 — `pairchallenge` over mTLS (F3):** `GET https://host:47984/pair?
+  uniqueid=…&phrase=pairchallenge` with the now-trusted cert finalizes pairing.
+  `PairingClient::pair_challenge` (live-validated).
 - **Verification gotcha:** over plain HTTP `/serverinfo` `PairStatus` is **always
-  0** (no mTLS → host can't identify us). The real signal is the host's trusted
-  -clients list (or HTTPS-mTLS `/serverinfo`, coming with F3).
+  0** (no mTLS → host can't identify us). Over **mTLS** it is 1 — but **only when
+  the request includes `?uniqueid=<our id>`** (pairing state is keyed by uniqueid,
+  not the cert alone). The trusted-clients web API list is the simplest signal.
+- `pair()` returns the host's cert (PEM) so the caller can **pin** it for mTLS.
 
 ### Live-validation note
 - **2026-06-18** — `pairing::ladder::tests::live_pair_full` paired a fresh

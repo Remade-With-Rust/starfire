@@ -6,10 +6,24 @@
 > and golden-tested; flag *bit positions* remain **[CAPTURE-LOCKED]**.
 
 ## Live-validation note
-- **2026-06-18** — `GET http://127.0.0.1:47989/serverinfo` against local Sunshine
-  2026.516.143833 parsed end-to-end by `starfire_core::discovery::probe`
-  (`pair_status=0`, `state=SUNSHINE_SERVER_FREE`). Fixture committed + golden test
+- **2026-06-18 (HTTP)** — `GET http://127.0.0.1:47989/serverinfo` parsed
+  end-to-end by `discovery::probe` (`pair_status=0`). Fixture + golden test
   `serverinfo::tests::parses_real_unpaired_serverinfo_fixture`.
+- **2026-06-18 (HTTPS mTLS, F3)** — after pairing, `GET https://127.0.0.1:47984/
+  serverinfo?uniqueid=<id>` over mTLS (`starfire_core::https::HttpsClient`, host
+  cert pinned) reports **`PairStatus=1`**. Test `live_serverinfo_https`.
+
+## mTLS findings (F3)
+- The authenticated `/serverinfo` returns the **same 13-element set** as HTTP —
+  Sunshine does **not** expose extra display-mode/HDR/surround caps here. Codec
+  support comes from `ServerCodecModeSupport`; the resolution ceiling from
+  `MaxLumaPixelsHEVC`. **Resolution/FPS/HDR are chosen by the client at `/launch`**
+  (the `mode` param), bounded by those — not advertised in `/serverinfo`.
+- `PairStatus=1` requires **mTLS + `?uniqueid=`**; either alone yields 0.
+- Sunshine's TLS **rejects session resumption** (sends `InternalError` on a resumed
+  connection) — the client disables resumption (`HttpsClient`).
+- The cert returned by `getservercert` (PEM) **matches the TLS handshake leaf**, so
+  pinning it is valid.
 
 ## Real captured schema (HTTP, unpaired)
 The unauthenticated `/serverinfo` returns a flat `<root status_code="200">` with

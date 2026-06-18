@@ -70,11 +70,17 @@ codebase, not this repo).
   [`protocol/01`](protocol/01-discovery.md), [`protocol/03`](protocol/03-serverinfo-and-negotiation.md).
 - ✅ **F2 pairing works live:** the full `/pair` ladder (ECDSA P-256 cert, PIN
   KDF + AES-128-ECB, SHA-256 hash chain, ECDSA signature) pairs a fresh identity
-  against Sunshine — host lists us as trusted (`live_pair_full`). ☐ auto-PIN
-  integrated in-process (needs the TLS client from F3); ☐ identity persistence;
-  ☐ deterministic request-encoding golden; ☐ pre-provisioning. See
+  against Sunshine — host lists us as trusted (`live_pair_full`). ☐ identity
+  persistence; ☐ deterministic request-encoding golden; ☐ pre-provisioning. See
   [`protocol/02`](protocol/02-pairing-and-crypto.md).
-- F3, F4 — get to a launched session.
+- ✅ **F3 mTLS works live:** rustls (ring) HTTPS client with **client auth +
+  host-cert pinning + handshake-sig verification**; phase-5 `pairchallenge`
+  finalizes pairing; authenticated `/serverinfo?uniqueid=` reports `PairStatus=1`
+  (`live_serverinfo_https`). Findings: TLS resumption disabled, pairing keyed by
+  uniqueid, serverinfo is a fixed 13-field set (negotiation happens at `/launch`).
+  ☐ codec/res/fps/HDR negotiation helper (lands with F4). See
+  [`protocol/03`](protocol/03-serverinfo-and-negotiation.md).
+- F4 — `/applist` + `/launch` (mTLS) → a launched session.
 - F5 (RTSP) → extract crypto + ports + FEC params.
 - F6 (ENet control up + AES-GCM; keepalive + IDR request).
 - F7 (RTP video happy path → AV1 OBUs).

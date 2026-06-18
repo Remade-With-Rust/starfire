@@ -18,6 +18,7 @@
 
 pub mod error;
 pub mod hex;
+pub mod https;
 pub mod wire;
 
 pub mod audio;

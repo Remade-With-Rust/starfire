@@ -148,12 +148,41 @@ impl PairingClient {
         Ok(())
     }
 
+    /// Phase 5 — `pairchallenge` over **mTLS** (HTTPS). Connects with the cert
+    /// just added to the host's trust set, finalizing the pairing. Only after
+    /// this does the host treat us as paired for authenticated requests.
+    pub fn pair_challenge(
+        &self,
+        https: &crate::https::HttpsClient,
+        https_port: u16,
+    ) -> crate::Result<()> {
+        let path = format!(
+            "/pair?uniqueid={uid}&phrase=pairchallenge",
+            uid = self.identity.unique_id
+        );
+        let resp = https.get(&self.host, https_port, &path, self.timeout)?;
+        if resp.status != 200 {
+            return Err(crate::Error::Protocol(format!(
+                "pairchallenge HTTP {}",
+                resp.status
+            )));
+        }
+        let r = parse_pair_response(&resp.body)?;
+        if !r.paired {
+            return Err(crate::Error::Protocol(
+                "pairchallenge: paired=0 (mTLS finalization rejected)".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Run the full HTTP ladder (phases 1–4). The PIN must be entered on the host
     /// out of band (auto-PIN) — `get_server_cert` blocks until it is. On success
-    /// the host has added our cert to its trusted set.
-    pub fn pair(&self, salt: &[u8; 16], pin: &str) -> crate::Result<()> {
+    /// the host has added our cert to its trusted set; returns the host's cert
+    /// (PEM) so the caller can pin it for subsequent mTLS.
+    pub fn pair(&self, salt: &[u8; 16], pin: &str) -> crate::Result<Vec<u8>> {
         // Phase 1 — blocks until the PIN is entered on the host.
-        let _server_cert = self.get_server_cert(salt)?;
+        let server_cert = self.get_server_cert(salt)?;
 
         let key = pin_key(salt, pin);
 
@@ -175,7 +204,7 @@ impl PairingClient {
         let _pairing_secret =
             self.server_challenge_resp(&key, &server_challenge, &client_secret)?;
         self.client_pairing_secret(&client_secret)?;
-        Ok(())
+        Ok(server_cert)
     }
 }
 
@@ -370,8 +399,11 @@ mod tests {
         let client = PairingClient::new("127.0.0.1", 47989, id);
         let result = client.pair(&salt, pin);
         let _ = pin_thread.join();
-        result.expect("full pairing ladder");
-        println!("pairing ladder OK for uid={uid}");
+        let host_cert = result.expect("full pairing ladder");
+        println!(
+            "pairing ladder OK for uid={uid}, host cert {} bytes",
+            host_cert.len()
+        );
 
         // The host must now list us as a trusted client.
         let clients = curl(&["https://localhost:47990/api/clients/list"]);
@@ -379,6 +411,61 @@ mod tests {
         assert!(
             clients.contains(device),
             "host should list '{device}' as paired; got: {clients}"
+        );
+    }
+
+    /// Live F3: pair, then query `/serverinfo` over **mTLS** with the same
+    /// identity. `PairStatus=1` proves the host identified our client cert (only
+    /// possible over mTLS). Also dumps the richer authenticated field set.
+    /// Run with `-- --ignored live_serverinfo_https --nocapture`.
+    #[test]
+    #[ignore = "requires a running Sunshine host + web API on 47984/47989/47990"]
+    fn live_serverinfo_https() {
+        use crate::https::HttpsClient;
+        use crate::serverinfo::ServerInfo;
+
+        curl(&[
+            "-X",
+            "POST",
+            "https://localhost:47990/api/clients/unpair-all",
+        ]);
+
+        let pin = "1234";
+        let id = ClientIdentity::generate("starfire-test").unwrap();
+        let cert_pem = id.cert_pem.clone();
+        let key_pem = id.key_pem.clone();
+        let salt = random_bytes::<16>().unwrap();
+
+        let pin_thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(800));
+            submit_pin_via_curl(pin);
+        });
+        let client = PairingClient::new("127.0.0.1", 47989, id);
+        let host_cert_pem = client.pair(&salt, pin).expect("pair");
+        let _ = pin_thread.join();
+
+        // Phase 5 — finalize over mTLS (host cert pinned), then authenticated
+        // /serverinfo. Pinning the cert we learned at pairing is the trust model.
+        let host_der = crate::https::cert_pem_to_der(&host_cert_pem).expect("host cert DER");
+        let https = HttpsClient::new(&cert_pem, &key_pem, Some(host_der)).expect("https client");
+        client.pair_challenge(&https, 47984).expect("pairchallenge");
+
+        // Pairing state is keyed by uniqueid; include it on the serverinfo query.
+        let path = format!("/serverinfo?uniqueid={}", client.identity.unique_id);
+        let resp = https
+            .get("127.0.0.1", 47984, &path, Duration::from_secs(5))
+            .expect("https serverinfo");
+        assert_eq!(resp.status, 200);
+        let si = ServerInfo::parse(&resp.body).expect("parse https serverinfo");
+
+        println!("HTTPS serverinfo PairStatus = {:?}", si.pair_status);
+        let mut keys: Vec<&String> = si.fields.keys().collect();
+        keys.sort();
+        println!("authenticated fields ({}): {keys:?}", keys.len());
+        assert_eq!(
+            si.pair_status,
+            Some(1),
+            "mTLS /serverinfo should report paired"
         );
     }
 }
