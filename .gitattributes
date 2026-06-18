@@ -1,0 +1,7 @@
+# Normalize line endings: LF in the repo, regardless of contributor OS.
+* text=auto eol=lf
+
+# Binary fixtures + captures must never be line-ending munged.
+*.bin   binary
+*.pcap  binary
+*.pcapng binary

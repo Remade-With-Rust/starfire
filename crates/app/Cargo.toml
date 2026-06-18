@@ -1,0 +1,24 @@
+[package]
+name = "starfire-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Starfire desktop consumer (Dioxus UI lands in Phase 1). Wires the crates into a session."
+
+[[bin]]
+name = "starfire"
+path = "src/main.rs"
+
+[dependencies]
+starfire-core = { path = "../starfire-core" }
+starfire-decode = { path = "../starfire-decode" }
+starfire-render = { path = "../starfire-render" }
+starfire-audio = { path = "../starfire-audio" }
+starfire-input = { path = "../starfire-input" }
+# dioxus is added when the session UI + render surface land (Phase 1).
+
+[lints]
+workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "starfire-decode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Video decode behind a trait: VideoToolbox (Mac), Media Foundation/D3D11VA (Win), dav1d (SW)."
+
+[dependencies]
+starfire-core = { path = "../starfire-core" }
+thiserror = { workspace = true }
+# Per-OS HW decode + dav1d are added behind cfg as backends land (docs/04).
+
+[lints]
+workspace = true

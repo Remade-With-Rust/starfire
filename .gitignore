@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Capture artifacts are version-stamped fixtures under tests/fixtures (committed);
+# raw session pcaps are large + may contain secrets — keep them out of git.
+*.pcap
+*.pcapng
+/captures/
+
+.DS_Store

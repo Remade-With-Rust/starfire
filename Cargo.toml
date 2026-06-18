@@ -1,0 +1,40 @@
+# Starfire workspace — clean-room Rust client for the Sunshine GameStream protocol.
+# See docs/README.md for the engineering plan and bit-for-bit methodology.
+[workspace]
+resolver = "2"
+members = [
+    "crates/starfire-core",
+    "crates/starfire-decode",
+    "crates/starfire-render",
+    "crates/starfire-audio",
+    "crates/starfire-input",
+    "crates/starfire-testkit",
+    "crates/app",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/Ttimmahlax/starfire"
+rust-version = "1.95"
+
+# Shared, permissive-only dependencies. cargo-deny enforces zero GPL/LGPL.
+[workspace.dependencies]
+thiserror = "2"
+tracing = "0.1"
+# protocol-core libs (added to crates as their layers land)
+reed-solomon-erasure = "6"
+sha2 = "0.10"
+aes = "0.8"
+aes-gcm = "0.10"
+quick-xml = "0.36"
+# test support
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+
+# Lints that encode the baseline rules from docs/01-overview.md.
+# Warn (not deny) in Phase 0 so stubs stay green; tighten to deny before Phase 1.
+[workspace.lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"

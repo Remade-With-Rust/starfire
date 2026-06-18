@@ -1,0 +1,17 @@
+[package]
+name = "starfire-input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Input capture behind a trait (XInput/raw input on Win, IOKit-HID on Mac). Encoding lives in core."
+
+[dependencies]
+starfire-core = { path = "../starfire-core" }
+thiserror = { workspace = true }
+# OS HID frameworks are added behind cfg when capture lands (Phase 1/2).
+
+[lints]
+workspace = true

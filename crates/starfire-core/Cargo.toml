@@ -1,0 +1,26 @@
+[package]
+name = "starfire-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false # flip to a real version when extracting to the standalone OSS repo
+description = "Clean-room Rust protocol core for the Sunshine GameStream wire protocol. No OS, no UI."
+
+[features]
+# Exposes wire::assert_roundtrip to other crates' tests (it's always on under
+# `cfg(test)` within this crate). Declared so cfg checks are recognized.
+test-helpers = []
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# Protocol-layer deps are added as each layer lands (docs/05-build-plan.md):
+#   reed-solomon-erasure, aes, aes-gcm, sha2, quick-xml, rusty_enet, rcgen, rustls…
+
+[dev-dependencies]
+starfire-testkit = { path = "../starfire-testkit" }
+
+[lints]
+workspace = true

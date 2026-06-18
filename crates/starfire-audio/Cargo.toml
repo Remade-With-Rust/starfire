@@ -1,0 +1,17 @@
+[package]
+name = "starfire-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Audio output behind a trait (cpal); Opus decode + channel layout + A/V sync."
+
+[dependencies]
+starfire-core = { path = "../starfire-core" }
+thiserror = { workspace = true }
+# opus/audiopus + cpal are added when audio lands (Phase 2, docs/protocol/08).
+
+[lints]
+workspace = true
