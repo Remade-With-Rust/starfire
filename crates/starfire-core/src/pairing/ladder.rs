@@ -544,12 +544,21 @@ mod tests {
         client.cancel().expect("cancel");
     }
 
-    /// Pair + finalize against the local test host, returning an authenticated
-    /// client. Shared by the F4/F5 live tests.
+    /// Host to run the live flow against. Defaults to loopback, but the data
+    /// plane (encoder + media UDP ports) does NOT come up for a 127.0.0.1 client
+    /// (Sunshine can't ARP a MAC for loopback), so the media tests set
+    /// `STARFIRE_TEST_HOST=<LAN IP>`.
+    fn test_host() -> String {
+        std::env::var("STARFIRE_TEST_HOST").unwrap_or_else(|_| "127.0.0.1".to_string())
+    }
+
+    /// Pair + finalize against the test host, returning an authenticated client.
+    /// Shared by the F4/F5/F6 live tests.
     fn pair_and_finalize() -> crate::launch::PairedClient {
         use crate::https::{cert_pem_to_der, HttpsClient};
         use crate::launch::PairedClient;
 
+        let host = test_host();
         curl(&[
             "-X",
             "POST",
@@ -564,14 +573,14 @@ mod tests {
             std::thread::sleep(Duration::from_millis(800));
             submit_pin_via_curl(pin);
         });
-        let pairing = PairingClient::new("127.0.0.1", 47989, id);
+        let pairing = PairingClient::new(&host, 47989, id);
         let host_pem = pairing.pair(&salt, pin).expect("pair");
         let _ = t.join();
         let der = cert_pem_to_der(&host_pem).unwrap();
         let https = HttpsClient::new(&cert, &key, Some(der)).unwrap();
         pairing.pair_challenge(&https, 47984).unwrap();
         let uid = pairing.identity.unique_id.clone();
-        PairedClient::new(https, "127.0.0.1", 47984, &uid)
+        PairedClient::new(https, &host, 47984, &uid)
     }
 
     /// Live F5: pair, launch, then run the full RTSP handshake and assert the
@@ -613,6 +622,134 @@ mod tests {
         assert!(!rs.ping_payload.is_empty());
         assert!(rs.sdp.encryption_required());
 
+        client.cancel().ok();
+    }
+
+    /// Hold a session open (pinging media ports) so the bound UDP ports can be
+    /// inspected externally (netstat). Run with `-- --ignored live_hold_session`.
+    #[test]
+    #[ignore = "diagnostic: holds a live session ~25s"]
+    fn live_hold_session() {
+        use crate::launch::LaunchConfig;
+        use crate::rtsp::RtspClient;
+        use std::net::UdpSocket;
+        use std::time::Instant;
+
+        let client = pair_and_finalize();
+        let apps = client.applist().expect("applist");
+        let desktop = apps.iter().find(|a| a.title == "Desktop").expect("Desktop");
+        let session = client
+            .launch(&desktop.id, &LaunchConfig::default())
+            .expect("launch");
+        let mut rtsp = RtspClient::new(&session.rtsp_url, Duration::from_secs(10)).expect("client");
+        let rs = rtsp.handshake().expect("handshake");
+        println!(
+            "SESSION HELD: video={} control={} audio={} — holding 25s",
+            rs.ports.video_port, rs.ports.control_port, rs.ports.audio_port
+        );
+
+        let host = test_host();
+        // Ping from the client port advertised to the host in RTSP SETUP
+        // (X-GS-ClientPort=50000-50001), so the host associates these pings.
+        let punch = UdpSocket::bind("0.0.0.0:50000")
+            .or_else(|_| UdpSocket::bind("0.0.0.0:0"))
+            .unwrap();
+        println!(
+            "ping from local port {}",
+            punch.local_addr().unwrap().port()
+        );
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(25) {
+            for p in [
+                rs.ports.video_port,
+                rs.ports.audio_port,
+                rs.ports.control_port,
+            ] {
+                let _ = punch.send_to(&rs.ping_payload, format!("{host}:{p}"));
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        client.cancel().ok();
+    }
+
+    /// F6 exploration: pair → launch → RTSP handshake → ENet connect to the
+    /// control port, then poll for incoming (encrypted) control messages.
+    /// Run with `-- --ignored live_explore_control --nocapture`.
+    #[test]
+    #[ignore = "requires a running Sunshine host + web API"]
+    fn live_explore_control() {
+        use crate::control::{ControlChannel, ControlEvent};
+        use crate::launch::LaunchConfig;
+        use crate::rtsp::RtspClient;
+        use std::net::UdpSocket;
+        use std::time::Instant;
+
+        let client = pair_and_finalize();
+        let apps = client.applist().expect("applist");
+        let desktop = apps.iter().find(|a| a.title == "Desktop").expect("Desktop");
+        let session = client
+            .launch(&desktop.id, &LaunchConfig::default())
+            .expect("launch");
+        let mut rtsp = RtspClient::new(&session.rtsp_url, Duration::from_secs(10)).expect("client");
+        let rs = rtsp.handshake().expect("handshake");
+        println!(
+            "control_port={} connect_data={} ping_payload={:02x?}",
+            rs.ports.control_port, rs.control_connect_data, rs.ping_payload
+        );
+
+        // The encoder + UDP ports take a few hundred ms to bind after PLAY.
+        // Use the client ports advertised in SETUP (X-GS-ClientPort=50000-50001):
+        // ping from 50000, ENet control from 50001.
+        let host = test_host();
+        let punch = UdpSocket::bind("0.0.0.0:50000")
+            .or_else(|_| UdpSocket::bind("0.0.0.0:0"))
+            .unwrap();
+        let ping = |to: u16| {
+            let _ = punch.send_to(&rs.ping_payload, format!("{host}:{to}"));
+        };
+        let server = format!("{host}:{}", rs.ports.control_port).parse().unwrap();
+
+        // Retry: ping the media ports + try ENet connect for a few seconds.
+        let mut connected = None;
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(8) {
+            ping(rs.ports.video_port);
+            ping(rs.ports.audio_port);
+            match ControlChannel::connect(
+                server,
+                rs.control_connect_data,
+                1,
+                50001,
+                Duration::from_secs(1),
+            ) {
+                Ok(c) => {
+                    println!("ENET CONNECTED after {:?}", start.elapsed());
+                    connected = Some(c);
+                    break;
+                }
+                Err(e) => {
+                    println!("connect retry ({:?}): {e}", start.elapsed());
+                    std::thread::sleep(Duration::from_millis(400));
+                }
+            }
+        }
+        let mut ctrl = connected.expect("enet connect");
+
+        // Poll for ~3s and dump any control messages (for encryption RE).
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut count = 0;
+        while Instant::now() < deadline {
+            match ctrl.poll().unwrap() {
+                Some(ControlEvent::Message { channel, data }) => {
+                    count += 1;
+                    let head = &data[..data.len().min(48)];
+                    println!("MSG ch{channel} len={} head={head:02x?}", data.len());
+                }
+                Some(other) => println!("EVENT {other:?}"),
+                None => std::thread::sleep(Duration::from_millis(2)),
+            }
+        }
+        println!("received {count} control message(s)");
         client.cancel().ok();
     }
 }

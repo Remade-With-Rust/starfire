@@ -25,6 +25,8 @@ p256 = { workspace = true }      # ECDSA sign of the pairing secret (F2)
 x509-parser = { workspace = true } # extract X.509 signature bytes (F2)
 rustls = { workspace = true }    # mTLS HTTPS client for paired endpoints (F3)
 rustls-pki-types = { workspace = true } # PEM cert/key parsing (F3)
+rusty_enet = { workspace = true } # reliable-UDP control channel (F6)
+aes-gcm = { workspace = true }   # AES-GCM control/input/media encryption (F6+)
 # Further protocol-layer deps are added as each layer lands (docs/05-build-plan.md):
 #   reed-solomon-erasure, aes-gcm, rusty_enet, rcgen, rsa, x509-parser, rustls…
 

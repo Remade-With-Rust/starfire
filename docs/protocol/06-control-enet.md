@@ -1,8 +1,44 @@
 # Protocol 06 — Control Stream (ENet over UDP)
 
-> Provenance: observation against Sunshine vX.Y. Clean-room. ENet channel setup,
-> AES-GCM framing, and message type IDs are **[CAPTURE-LOCKED]**. Crate:
-> `rusty_enet` (MIT).
+> Provenance: observation against **Sunshine 2026.516.143833**. Clean-room. Crate:
+> `rusty_enet` (MIT). AES-GCM framing + message type IDs are **[CAPTURE-LOCKED]**.
+
+## 🟡 Status — transport implemented; data-plane validation blocked
+`starfire_core::control::ControlChannel` is the ENet transport (connect with the
+RTSP `X-SS-Connect-Data` token, poll/send, AES-GCM to follow). It compiles and is
+structurally complete, but **is not yet live-validated** — see the blocker below.
+
+### ⛔ Blocker — same-machine data plane (environment, not protocol)
+Sunshine will **not bring up the streaming data plane** (encoder + media/control
+UDP ports) for a **same-machine client**. Observed:
+- Control plane (discover→pair→serverinfo→applist→launch→RTSP, F1–F5) works fully
+  over loopback.
+- After `PLAY`, Sunshine logs `Executing [Desktop]` but, for a loopback client,
+  warns `Unable to find MAC address for 127.0.0.1` and never creates the encoder
+  or binds UDP 47998–48000. ENet connect to 47999 → ICMP port-unreachable (10054).
+- Switching the client to the host's **LAN IP** + pinging from the **advertised
+  client port (X-GS-ClientPort=50000)** advanced Sunshine into stream init
+  (color range, bitrate, encoder enumeration) — but the encoder still never
+  fully created and the control port still didn't bind.
+- The data-plane streams appear **coupled**: the control port seems to bind only
+  once the video RTP path is actively received, so F6/F7 likely have to come up
+  together.
+
+**Resolution:** validate the data plane from a **separate client machine or VM**
+(the standard GameStream topology); same-host streaming is a known-hard setup.
+Until then F6/F7/F8 transport code lands as scaffolding, not live-validated.
+
+### What's confirmed (from RTSP SETUP, F5)
+- Control port = 47999; **`X-SS-Connect-Data`** (u32) is the ENet connect data.
+- **`X-SS-Ping-Payload`** (8 bytes) is sent to the video/audio UDP ports from the
+  advertised client port to open the return path.
+- The host **requests media encryption** (`encryptionRequested:1`) → control
+  messages are AES-GCM with the RI key. Nonce/IV + message ids **[CAPTURE-LOCKED]**.
+
+### Planned validation method (once the data plane is up)
+Use **GCM tag verification as the oracle**: decrypt the host's inbound control
+messages trying candidate IV constructions (seq ‖ rikeyid, …); a verifying tag
+proves key+IV+AAD. Then encode keepalive + IDR-request to match.
 
 ## Goal
 

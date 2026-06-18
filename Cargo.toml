@@ -36,6 +36,7 @@ p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] } # sign pairing
 x509-parser = "0.16" # extract X.509 cert signature bytes for the hash chain (F2)
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] } # mTLS HTTPS (F3)
 rustls-pki-types = { version = "1", features = ["std"] } # PEM cert/key parsing (F3)
+rusty_enet = "0.4" # reliable-UDP control channel (F6)
 # test support
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }

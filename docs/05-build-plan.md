@@ -92,8 +92,16 @@ codebase, not this repo).
   test. Quirks: one-request-per-connection, no Content-Length, X-GS-ClientVersion
   required, ANNOUNCE optional. **Host requests media encryption** (`encryptionRequested:1`).
   See [`protocol/05`](protocol/05-rtsp.md).
-- **F6 next** — ENet control channel (UDP 47999): connect with `X-SS-Connect-Data`,
-  AES-GCM with the RI key, keepalive + IDR request. The ping payload opens the path.
+- 🟡 **F6 transport implemented, blocked on environment:** `ControlChannel` (ENet
+  via `rusty_enet`) connect/poll/send is written. **Not live-validated** — Sunshine
+  won't bring up the streaming data plane (encoder + UDP ports) for a **same-machine
+  client** (`Unable to find MAC address for 127.0.0.1`; control port never binds).
+  The control plane (F1–F5) is fully validated over loopback; the data plane needs a
+  **separate client machine/VM**. F6/F7 appear coupled (control binds once video RTP
+  flows). See [`protocol/06`](protocol/06-control-enet.md).
+- **Unblock path** — point the live tests at a second machine/VM
+  (`STARFIRE_TEST_HOST=<lan-ip>` already wired) and bring up F6 control + F7 video
+  together, then RE the AES-GCM IV via the tag-verify oracle.
 - F5 (RTSP) → extract crypto + ports + FEC params.
 - F6 (ENet control up + AES-GCM; keepalive + IDR request).
 - F7 (RTP video happy path → AV1 OBUs).
