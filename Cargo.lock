@@ -136,6 +136,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "starfire-fixture-slicer"
+version = "0.0.0"
+dependencies = [
+ "starfire-testkit",
+]
+
+[[package]]
 name = "starfire-input"
 version = "0.0.0"
 dependencies = [

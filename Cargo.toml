@@ -10,6 +10,7 @@ members = [
     "crates/starfire-input",
     "crates/starfire-testkit",
     "crates/app",
+    "tools/fixture-slicer",
 ]
 
 [workspace.package]

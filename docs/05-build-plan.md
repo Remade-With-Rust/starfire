@@ -50,11 +50,13 @@ codebase, not this repo).
 - ✅ Test scaffolding: `starfire-testkit` fixture loader + `.meta.toml` convention,
   golden byte-eq, loss-injection (`drop_indices`); `wire::Wire` + `assert_roundtrip`.
 - ✅ Decoder/renderer/input/audio **trait definitions** + `select.rs` (placeholder impls).
-- ☐ **Capture harness — pcap→fixture slicer** (the *consuming* side + `.meta.toml`
-  convention exist; the slicer that cuts a `tcpdump` session into per-layer `.bin`
-  fixtures lands when a Sunshine host is available). Unblocks every protocol layer.
-- **Exit:** ✅ `cargo fmt`/`clippy`/`test` (9 tests) + `cargo deny` all green on the
-  scaffold. ☐ one captured session sliced into per-layer fixtures (needs host).
+- ✅ **Capture harness — pcap→fixture slicer** (`tools/fixture-slicer`, std-only):
+  parses classic pcap, demuxes by Sunshine port, reassembles RTSP/HTTP TCP
+  transcripts, frames UDP media/control datagrams, writes per-layer fixtures +
+  `.meta.toml` (validated to load back through `starfire-testkit`). Unblocks every
+  protocol layer the moment a capture exists.
+- **Exit:** ✅ `cargo fmt`/`clippy`/`test` (22 tests) + `cargo deny` all green on the
+  scaffold. ☐ one *real* captured session sliced into per-layer fixtures (needs host).
 
 ## Phase 1 — Interactive E2E demo (~3–5 weeks)
 *One codec (AV1), Mac first, basic input, minimal FEC. The thin vertical slice.*

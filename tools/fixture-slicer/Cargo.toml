@@ -1,0 +1,27 @@
+[package]
+name = "starfire-fixture-slicer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Slice a Sunshine session pcap into per-layer fixtures (docs/03 + docs/06). std-only."
+
+[lib]
+name = "fixture_slicer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fixture-slicer"
+path = "src/main.rs"
+
+# Deliberately zero runtime dependencies: the capture harness stays as
+# trustworthy and license-clean as the protocol core (docs/08-open-source-and-license.md).
+
+[dev-dependencies]
+# Validates that the slicer's .meta.toml output loads through the test harness.
+starfire-testkit = { path = "../../crates/starfire-testkit" }
+
+[lints]
+workspace = true
