@@ -11,6 +11,10 @@ description = "Present + fullscreen + HDR + frame pacing behind a trait (Metal /
 [dependencies]
 starfire-decode = { path = "../starfire-decode" }
 thiserror = { workspace = true }
+wgpu = { workspace = true }
+winit = { workspace = true }
+pollster = { workspace = true }
+bytemuck = { workspace = true }
 
 [lints]
 workspace = true

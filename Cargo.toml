@@ -40,6 +40,11 @@ rusty_enet = "0.4" # reliable-UDP control channel (F6)
 # test support
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
+# render layer (permissive: wgpu/winit are MIT/Apache-2.0). docs/04.
+wgpu = "27"
+winit = "0.30"
+pollster = "0.4"   # block_on for device request + headless readback
+bytemuck = { version = "1", features = ["derive"] } # POD uniform structs
 
 # Lints that encode the baseline rules from docs/01-overview.md.
 # Warn (not deny) in Phase 0 so stubs stay green; tighten to deny before Phase 1.
