@@ -48,9 +48,9 @@ impl ControlChannel {
         socket.set_nonblocking(true)?;
         let settings = enet::HostSettings {
             peer_limit: 1,
-            // Sunshine's ENet enables the CRC32 packet checksum (Moonlight
-            // customization); without it the host ignores our handshake.
-            checksum: Some(Box::new(enet::crc32)),
+            // Sunshine's ENet does NOT use the CRC32 checksum — confirmed by
+            // capture: Moonlight's CONNECT is 52 bytes (4 header + 48 command),
+            // ours-with-CRC was 56 and the host ignored it. So: no checksum.
             ..Default::default() // channel_limit defaults to the protocol maximum
         };
         let mut host = enet::Host::new(socket, settings)
