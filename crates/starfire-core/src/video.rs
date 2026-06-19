@@ -178,12 +178,8 @@ mod fixture_tests {
     /// compatible with Sunshine's `nanors` encoder (if it fails, we need a
     /// matrix-matched decoder).
     ///
-    /// Currently `#[ignore]`d because it FAILS by design: it documents that
-    /// `reed-solomon-erasure`'s matrix is not `nanors`-compatible. Un-ignore it
-    /// as the acceptance test once a matrix-matched decoder is wired into
-    /// `fec::recover`.
+    /// Acceptance test for the `nanors`-compatible Cauchy RS decoder.
     #[test]
-    #[ignore = "fails by design: needs a nanors-matrix-compatible RS decoder (see fec::recover)"]
     fn fec_recovers_dropped_data_shard_matching_real_bytes() {
         const BLOCKSIZE: usize = 1376; // 1408-byte packet − 32-byte header
         let data_shards = 35usize;
@@ -216,10 +212,77 @@ mod fixture_tests {
             &recovered[..8],
             &original[..8]
         );
-        assert!(
-            matches,
-            "recovered shard does NOT match Sunshine's bytes -> reed-solomon-erasure matrix != nanors"
-        );
+        assert!(matches, "recovered shard != Sunshine's bytes");
+    }
+
+    /// Drop the MAXIMUM recoverable number of data shards (= parity count) and
+    /// confirm every one is restored byte-for-byte.
+    #[test]
+    fn fec_recovers_max_drops() {
+        const BLOCKSIZE: usize = 1376;
+        let (data_shards, parity_shards) = (35usize, 7usize);
+        let pkts = load_fixture();
+        let mut full: Vec<Option<Vec<u8>>> = vec![None; data_shards + parity_shards];
+        for p in &pkts {
+            let h = rtp::parse_header(p).expect("parse");
+            if h.frame_index == 1 {
+                let end = rtp::PAYLOAD_OFFSET + BLOCKSIZE;
+                if (h.shard_index as usize) < full.len() && end <= p.len() {
+                    full[h.shard_index as usize] = Some(p[rtp::PAYLOAD_OFFSET..end].to_vec());
+                }
+            }
+        }
+        assert!(full.iter().all(|s| s.is_some()));
+        // Drop `parity_shards` data shards (spread out) — the recovery limit.
+        let drops = [0usize, 5, 12, 18, 24, 30, 34];
+        let originals: Vec<Vec<u8>> = drops.iter().map(|&d| full[d].clone().unwrap()).collect();
+        let mut shards = full.clone();
+        for &d in &drops {
+            shards[d] = None;
+        }
+        assert!(super::fec::recover(data_shards, parity_shards, &mut shards));
+        for (k, &d) in drops.iter().enumerate() {
+            assert_eq!(shards[d].as_ref().unwrap(), &originals[k], "drop {d} mismatch");
+        }
+    }
+
+    /// End-to-end: feed frame 1's packets through the Depacketizer but DROP two
+    /// data-shard packets; FEC must heal it and emit the identical IDR bytes as
+    /// the lossless run.
+    #[test]
+    fn depacketizer_heals_lossy_frame_via_fec() {
+        use super::reassembly::Depacketizer;
+        let pkts = load_fixture();
+        let frame1: Vec<&Vec<u8>> = pkts
+            .iter()
+            .filter(|p| rtp::parse_header(p).map(|h| h.frame_index == 1).unwrap_or(false))
+            .collect();
+
+        // Lossless reference.
+        let mut d0 = Depacketizer::new(Codec::Hevc);
+        let mut reference = None;
+        for p in &frame1 {
+            if let Some(au) = d0.push(p) {
+                reference = Some(au);
+            }
+        }
+        let reference = reference.expect("lossless frame");
+
+        // Lossy: drop two data-shard packets (shard 3 and 20).
+        let mut d1 = Depacketizer::new(Codec::Hevc);
+        let mut healed = None;
+        for p in &frame1 {
+            let h = rtp::parse_header(p).unwrap();
+            if h.shard_index == 3 || h.shard_index == 20 {
+                continue; // simulate packet loss
+            }
+            if let Some(au) = d1.push(p) {
+                healed = Some(au);
+            }
+        }
+        let healed = healed.expect("FEC-healed frame should still emit");
+        assert_eq!(healed.data, reference.data, "FEC-healed frame must match lossless bytes");
+        assert!(healed.is_keyframe);
     }
 
     /// Reassemble the captured stream into frames and validate the output:
@@ -271,34 +334,183 @@ mod fixture_tests {
 /// parity `k..k+m-1`, all padded to a fixed blocksize; `m = ceil(k*pct/100)`
 /// (floored to a minimum), up to 4 independent FEC blocks per frame.
 pub mod fec {
-    use reed_solomon_erasure::galois_8::ReedSolomon;
+    use std::sync::OnceLock;
 
-    /// Recover missing data shards in one FEC block from the parity shards.
+    /// GF(2^8) with primitive polynomial `0x11d` and generator `2` — matches the
+    /// `nanors` library Sunshine encodes with, so recovery is byte-compatible.
+    struct Gf256 {
+        /// `exp[i] = g^i` (doubled to 512 so `log[a]+log[b]` never wraps).
+        exp: [u8; 512],
+        log: [u8; 256],
+        /// Multiplicative inverse table (`inv[0]` unused).
+        inv: [u8; 256],
+    }
+
+    impl Gf256 {
+        fn build() -> Self {
+            let mut exp = [0u8; 512];
+            let mut log = [0u8; 256];
+            let mut x: u16 = 1;
+            for (i, slot) in exp.iter_mut().take(255).enumerate() {
+                *slot = x as u8;
+                log[x as usize] = i as u8;
+                x <<= 1;
+                if x & 0x100 != 0 {
+                    x ^= 0x11d;
+                }
+            }
+            for i in 255..512 {
+                exp[i] = exp[i - 255];
+            }
+            let mut inv = [0u8; 256];
+            for a in 1..256usize {
+                inv[a] = exp[255 - log[a] as usize];
+            }
+            Self { exp, log, inv }
+        }
+
+        #[inline]
+        fn mul(&self, a: u8, b: u8) -> u8 {
+            if a == 0 || b == 0 {
+                0
+            } else {
+                self.exp[self.log[a as usize] as usize + self.log[b as usize] as usize]
+            }
+        }
+
+        #[inline]
+        fn inverse(&self, a: u8) -> u8 {
+            self.inv[a as usize]
+        }
+    }
+
+    fn gf() -> &'static Gf256 {
+        static GF: OnceLock<Gf256> = OnceLock::new();
+        GF.get_or_init(Gf256::build)
+    }
+
+    /// Cauchy parity coefficient for parity row `j`, data column `i`:
+    /// `1 / ((parity_shards + i) XOR j)` in GF(2^8). [matches `nanors` rs_new:
+    /// `GF2_8_INV[(ps + i) ^ j]`].
+    fn parity_coeff(parity_shards: usize, i: usize, j: usize) -> u8 {
+        gf().inverse(((parity_shards + i) ^ j) as u8)
+    }
+
+    /// Invert a `k×k` GF(2^8) matrix (row-major) in place via Gauss-Jordan.
+    /// Returns `false` if singular.
+    fn invert(m: &mut [u8], k: usize) -> bool {
+        let g = gf();
+        let mut inv = vec![0u8; k * k];
+        for i in 0..k {
+            inv[i * k + i] = 1;
+        }
+        for col in 0..k {
+            let mut piv = col;
+            while piv < k && m[piv * k + col] == 0 {
+                piv += 1;
+            }
+            if piv == k {
+                return false; // singular
+            }
+            if piv != col {
+                for c in 0..k {
+                    m.swap(piv * k + c, col * k + c);
+                    inv.swap(piv * k + c, col * k + c);
+                }
+            }
+            let pvi = g.inverse(m[col * k + col]);
+            for c in 0..k {
+                m[col * k + c] = g.mul(m[col * k + c], pvi);
+                inv[col * k + c] = g.mul(inv[col * k + c], pvi);
+            }
+            for r in 0..k {
+                if r == col {
+                    continue;
+                }
+                let f = m[r * k + col];
+                if f == 0 {
+                    continue;
+                }
+                for c in 0..k {
+                    m[r * k + c] ^= g.mul(f, m[col * k + c]);
+                    inv[r * k + c] ^= g.mul(f, inv[col * k + c]);
+                }
+            }
+        }
+        m.copy_from_slice(&inv);
+        true
+    }
+
+    /// Recover missing data shards in one FEC block from the parity shards,
+    /// byte-compatible with Sunshine's `nanors` systematic Cauchy RS code.
     /// `shards` has `data_shards + parity_shards` slots (`None` = lost); all
     /// present shards must be the same byte length. On success every data-shard
-    /// slot is filled. Returns `false` if fewer than `data_shards` are present
-    /// (unrecoverable) or the matrix decode fails.
+    /// slot is filled with the host's real bytes. Returns `false` if fewer than
+    /// `data_shards` shards are present (unrecoverable) or the matrix is singular.
     ///
-    /// ⚠️ **MATRIX-INCOMPATIBLE (placeholder).** Proven against real captured
-    /// shards (`fec_recovers_dropped_data_shard_matching_real_bytes`): the
-    /// `reed-solomon-erasure` Vandermonde matrix does **not** match Sunshine's
-    /// `nanors` encoder, so recovered bytes are self-consistent garbage rather
-    /// than the host's real data. The shard geometry here is correct; only the
-    /// GF(2^8) generator matrix must be swapped for a `nanors`-compatible one
-    /// (FFI to nanors, or a pure-Rust port) before this is wired into the
-    /// pipeline. Not yet called by the depacketizer, so dormant for now.
+    /// Only runs on actual loss; the no-loss reassembly path never calls it.
     pub fn recover(
         data_shards: usize,
         parity_shards: usize,
         shards: &mut [Option<Vec<u8>>],
     ) -> bool {
-        if shards.iter().filter(|s| s.is_some()).count() < data_shards {
+        let k = data_shards;
+        if shards.len() < k + parity_shards || shards.iter().filter(|s| s.is_some()).count() < k {
             return false;
         }
-        match ReedSolomon::new(data_shards, parity_shards) {
-            Ok(rs) => rs.reconstruct(shards).is_ok(),
-            Err(_) => false,
+        if (0..k).all(|i| shards[i].is_some()) {
+            return true; // all data shards already present
         }
+        let len = match shards.iter().flatten().next() {
+            Some(s) => s.len(),
+            None => return false,
+        };
+
+        // The k surviving rows of the systematic generator F = [I_k ; Cauchy].
+        let rows: Vec<usize> = shards
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.is_some())
+            .map(|(i, _)| i)
+            .take(k)
+            .collect();
+        let present: Vec<Vec<u8>> = rows.iter().filter_map(|&r| shards[r].clone()).collect();
+
+        // Build M = F[rows] (k×k): data rows are identity, parity rows are Cauchy.
+        let mut mat = vec![0u8; k * k];
+        for (r, &sh) in rows.iter().enumerate() {
+            if sh < k {
+                mat[r * k + sh] = 1;
+            } else {
+                let j = sh - k;
+                for (c, slot) in mat[r * k..r * k + k].iter_mut().enumerate() {
+                    *slot = parity_coeff(parity_shards, c, j);
+                }
+            }
+        }
+        if !invert(&mut mat, k) {
+            return false;
+        }
+
+        // data = M⁻¹ · present (per byte), filling only the missing data shards.
+        let g = gf();
+        for d in 0..k {
+            if shards[d].is_some() {
+                continue;
+            }
+            let mut out = vec![0u8; len];
+            for (r, src) in present.iter().enumerate() {
+                let coeff = mat[d * k + r];
+                if coeff == 0 {
+                    continue;
+                }
+                for (o, &s) in out.iter_mut().zip(src.iter()) {
+                    *o ^= g.mul(coeff, s);
+                }
+            }
+            shards[d] = Some(out);
+        }
+        true
     }
 }
 
@@ -313,22 +525,30 @@ pub mod reassembly {
     const FRAME_TYPE_IDR: u8 = 2;
 
     /// Streaming reassembler. Feed every received video datagram via [`push`];
-    /// it yields an [`AccessUnit`] when a frame's data shards are all present.
+    /// it yields an [`AccessUnit`] when a frame is recoverable (all data shards
+    /// present, or enough data+parity shards to FEC-recover the missing ones).
     ///
-    /// Perf: shard payloads are sliced (`bytes[32..]`) without re-parsing the
-    /// stream, indexed directly by shard index — no sort on the hot path.
+    /// Perf: shard payloads are sliced (`bytes[32..]`) and slotted directly by
+    /// shard index — no hot-path sort. FEC (the per-byte GF(2^8) matrix solve)
+    /// runs only on actual loss; the clean path never touches it.
+    ///
+    /// Note: assumes a single FEC block per frame (`multiFecBlocks == 0`), which
+    /// holds for Sunshine up to ~255 shards/frame. Multi-block frames are a TODO.
     ///
     /// [`push`]: Depacketizer::push
     pub struct Depacketizer {
         codec: Codec,
         frame_index: Option<u32>,
         data_shards: usize,
-        /// Per-shard payload (`bytes[32..]`); `None` until received.
+        parity_shards: usize,
+        /// Per-shard payload (`bytes[32..]`), data `0..k` then parity `k..k+m`.
         shards: Vec<Option<Vec<u8>>>,
+        /// Total shards received (data + parity).
         received: usize,
-        is_keyframe: bool,
-        /// Real byte length of the last data shard (rest are full-size).
-        last_payload_len: Option<usize>,
+        /// Data shards received (drives the no-loss fast path).
+        received_data: usize,
+        /// Set once the frame has been emitted, to ignore trailing packets.
+        emitted: bool,
     }
 
     impl Depacketizer {
@@ -337,68 +557,78 @@ pub mod reassembly {
                 codec,
                 frame_index: None,
                 data_shards: 0,
+                parity_shards: 0,
                 shards: Vec::new(),
                 received: 0,
-                is_keyframe: false,
-                last_payload_len: None,
+                received_data: 0,
+                emitted: false,
             }
         }
 
-        fn reset_for(&mut self, frame_index: u32, data_shards: usize) {
+        fn reset_for(&mut self, frame_index: u32, data_shards: usize, parity_shards: usize) {
             self.frame_index = Some(frame_index);
             self.data_shards = data_shards;
+            self.parity_shards = parity_shards;
             self.shards.clear();
-            self.shards.resize(data_shards, None);
+            self.shards.resize(data_shards + parity_shards, None);
             self.received = 0;
-            self.is_keyframe = false;
-            self.last_payload_len = None;
+            self.received_data = 0;
+            self.emitted = false;
         }
 
-        /// Feed one received datagram. Returns a completed [`AccessUnit`] when the
-        /// current frame's data shards are all present. Late/duplicate or
-        /// non-picture packets return `None`.
+        /// Feed one received datagram. Returns a completed [`AccessUnit`] as soon
+        /// as the frame is recoverable. Late/duplicate, non-picture, or
+        /// already-emitted-frame packets return `None`.
         pub fn push(&mut self, pkt: &[u8]) -> Option<AccessUnit> {
             let h = rtp::parse_header(pkt)?;
             if h.flags & FLAG_PIC_DATA == 0 || h.data_shards == 0 {
                 return None;
             }
-            // A new frame index starts a fresh accumulation (we don't currently
-            // reorder across frames; out-of-order frames are dropped, IDR-repair
-            // territory handled later).
             if self.frame_index != Some(h.frame_index) {
-                self.reset_for(h.frame_index, h.data_shards as usize);
+                // parity = ceil(data*pct/100); the host encodes the final pct so
+                // this also recovers the min-floored count. (See Sunshine FEC.)
+                let parity = (h.data_shards as usize * h.fec_percentage as usize).div_ceil(100);
+                self.reset_for(h.frame_index, h.data_shards as usize, parity);
             }
-            if h.is_sof() {
-                self.is_keyframe = rtp::sof_frame_type(pkt) == Some(FRAME_TYPE_IDR);
-                // lastPayloadLen lives in the SOF short-frame header (LE u16 @ +4).
-                let at = rtp::PAYLOAD_OFFSET + 4;
-                if at + 2 <= pkt.len() {
-                    self.last_payload_len =
-                        Some(u16::from_le_bytes([pkt[at], pkt[at + 1]]) as usize);
-                }
+            if self.emitted {
+                return None; // trailing shard of a frame we already delivered
             }
-            // Only data shards carry frame bytes; parity shards feed FEC (later).
             let slot = h.shard_index as usize;
-            if slot < self.data_shards && self.shards[slot].is_none() {
-                let off = rtp::PAYLOAD_OFFSET;
-                if off <= pkt.len() {
-                    self.shards[slot] = Some(pkt[off..].to_vec());
-                    self.received += 1;
+            if slot < self.shards.len() && self.shards[slot].is_none() {
+                self.shards[slot] = Some(pkt[rtp::PAYLOAD_OFFSET..].to_vec());
+                self.received += 1;
+                if slot < self.data_shards {
+                    self.received_data += 1;
                 }
             }
-            if self.received == self.data_shards {
-                return self.assemble();
+            // `data_shards` shards (any mix) are enough to reconstruct the frame.
+            if self.received >= self.data_shards {
+                return self.finalize();
             }
             None
         }
 
-        fn assemble(&mut self) -> Option<AccessUnit> {
+        fn finalize(&mut self) -> Option<AccessUnit> {
+            // Recover missing data shards from parity if needed (loss path only).
+            if self.received_data < self.data_shards
+                && !super::fec::recover(self.data_shards, self.parity_shards, &mut self.shards)
+            {
+                return None; // not yet recoverable; retry as more shards arrive
+            }
+
+            // The frame header lives at the front of shard 0 (now guaranteed
+            // present, possibly via FEC) — robust to losing the SOF packet.
+            let s0 = self.shards[0].as_ref()?;
+            let is_keyframe = s0.get(3).copied() == Some(FRAME_TYPE_IDR);
+            let last_payload_len = s0
+                .get(4..6)
+                .map(|b| u16::from_le_bytes([b[0], b[1]]) as usize);
+
             let mut data = Vec::with_capacity(self.data_shards * 1376);
-            for (i, shard) in self.shards.iter().enumerate() {
-                let bytes = shard.as_ref()?;
-                // Trim the last data shard to its real length (rest are padding).
+            for i in 0..self.data_shards {
+                let bytes = self.shards[i].as_ref()?;
                 if i + 1 == self.data_shards {
-                    if let Some(n) = self.last_payload_len {
+                    if let Some(n) = last_payload_len {
                         data.extend_from_slice(&bytes[..n.min(bytes.len())]);
                         continue;
                     }
@@ -409,14 +639,13 @@ pub mod reassembly {
             if data.len() >= rtp::SHORT_FRAME_HEADER_LEN {
                 data.drain(..rtp::SHORT_FRAME_HEADER_LEN);
             }
-            let au = AccessUnit {
+            self.emitted = true;
+            Some(AccessUnit {
                 codec: self.codec,
                 frame_index: self.frame_index.unwrap_or(0),
-                is_keyframe: self.is_keyframe,
+                is_keyframe,
                 data,
-            };
-            self.frame_index = None; // force a fresh frame next push
-            Some(au)
+            })
         }
     }
 }
