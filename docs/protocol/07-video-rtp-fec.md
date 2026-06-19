@@ -1,10 +1,17 @@
 # Protocol 07 — Video Ingest, FEC & Reassembly
 
-> Provenance: observation against Sunshine vX.Y. Clean-room. **This is the long
-> pole.** The Reed-Solomon geometry and RTP framing must match Sunshine
-> **bit-for-bit** or recovery silently corrupts frames. Everything here is
-> **[CAPTURE-LOCKED]** and gets the most capture budget
-> ([`../03-bitexact-methodology.md`](../03-bitexact-methodology.md) §FEC).
+> Provenance: live capture against **Sunshine 2026.516.143833** + the Sunshine
+> *server* sender/FEC source (owner-approved; never the moonlight-common-c
+> client). Clean-room w.r.t. the client.
+
+## ✅ Status — ingest + FEC LIVE & byte-exact (2026-06-19)
+`starfire_core::video` ingests the real plaintext-HEVC stream end to end:
+depacketize → reassemble, with **`nanors`-compatible Reed-Solomon recovery** on
+loss. Validated against a captured fixture (`tests/fixtures/video/stream-hevc.fix`):
+169 frames reassembled; a dropped data shard recovers to Sunshine's **exact
+bytes**; the max (`m`) simultaneous drops recover byte-for-byte; the Depacketizer
+heals a lossy frame to bytes identical to the lossless run. The former
+"long pole" / silent-corruption risk is **retired**.
 
 ## Goal
 
@@ -21,30 +28,37 @@ reorder by seq ─► reassemble frame ─► emit AU ─► decoder (§04 platf
    └──── unrecoverable? ──► request IDR over control (§06) ◄┘
 ```
 
-## 1. RTP framing — [CAPTURE-LOCKED]
+## 1. RTP framing — RESOLVED (`video::rtp`)
 
-- Standard-ish RTP header (version, payload type, sequence, timestamp, SSRC) plus
-  a **Sunshine-specific** payload header carrying frame index, fragment index /
-  count, and FEC metadata. Exact fields/offsets come from the capture.
-- Fragmentation: one frame spans many RTP packets; the payload header tells us how
-  to stitch fragments back in order.
+`video_packet_raw_t` = RTP(12) + `reserved`(4) + NV_VIDEO_PACKET(16), then the
+payload. Wire-confirmed offsets (the RTP sequence number is the ground truth):
 
-## 2. Reed-Solomon FEC — the bit-exact core
+| Field | Offset | Notes |
+|------|--------|-------|
+| RTP header byte | 0 | `0x90` = v2 + extension |
+| RTP sequence (BE u16) | 2 | |
+| `streamPacketIndex` (LE u32) | 16 | `== rtp_seq << 8` |
+| `frameIndex` (LE u32) | 20 | monotonic; constant within a frame |
+| `flags` (u8) | 24 | `0x01` PIC_DATA, `0x02` EOF, `0x04` SOF |
+| `fecInfo` (LE u32) | 28 | `shardIdx=(>>12)&0x3ff`, `dataShards=(>>22)&0x3ff`, `pct=(>>4)&0xff` |
+| payload | 32 | SOF packets prefix an 8-byte `video_short_frame_header` (`frameType@+3`: 2=IDR) |
 
-- Crate: **`reed-solomon-erasure`** (MIT/Apache).
-- A FEC **block** = `k` data shards + `m` parity shards; recover any up to `m`
-  losses. The block geometry (shard size, `k`, `m`, how shards map onto RTP
-  packets, and the **generator matrix / field convention**) must match Sunshine
-  exactly. **[CAPTURE-LOCKED]** — a mismatch produces plausible-but-wrong recovered
-  bytes that corrupt the decoder silently.
-- Methodology (from §03):
-  1. Capture a **lossless** session → learn the framing + shard layout.
-  2. In test, **inject deterministic loss** (drop known shards).
-  3. Run RS recovery → assert recovered shards `==` the pre-loss originals,
-     byte-for-byte.
-- Confirm the matrix convention matches `reed-solomon-erasure`'s (it must, or we
-  reconstruct different bytes). If conventions differ, that's the bug to find
-  here, not in production.
+One frame spans many packets (one per shard); the FEC **shard** is exactly
+`bytes[32..]` (all padded to a fixed blocksize, 1376 B here).
+
+## 2. Reed-Solomon FEC — RESOLVED, byte-exact (`video::fec`)
+
+- **First-party, pure-Rust, no crate.** Sunshine encodes parity with the `nanors`
+  library, whose matrix is a **systematic Cauchy** matrix over GF(2^8) —
+  `P[j][i] = 1/((m + i) ⊕ j)` (poly `0x11d`, generator `2`), *not* Vandermonde.
+  We proved `reed-solomon-erasure` (Vandermonde) reconstructs plausible-but-wrong
+  bytes, then dropped it for a matching Cauchy decoder (Gauss-Jordan inverse).
+- A FEC **block** = `k` data shards `0..k-1` then `m` parity `k..k+m-1`, all
+  blocksize-padded; `m = ceil(k·pct/100)` (the host re-encodes the final pct, so
+  the client derives `m` from `data_shards` and `pct` alone). Recover any ≤ `m`
+  losses. Up to 4 independent FEC blocks per frame (multi-block: TODO).
+- Acceptance (golden) tests live in `video.rs::fixture_tests`: deterministic loss
+  injection → recovered shards `==` the real pre-loss bytes, byte-for-byte.
 
 ## 3. Reassembly & loss handling
 
