@@ -46,6 +46,68 @@ fn env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
+/// Keep the process at full speed for the whole run: disable macOS **App Nap**
+/// (which suspends an unfocused/background GUI app and would stutter — or stall —
+/// the stream) plus idle display sleep, and mark the work latency-critical.
+///
+/// Raw Objective-C runtime FFI (no binding crate, matching the decode backend's
+/// clean-room style): `[[NSProcessInfo processInfo] beginActivityWithOptions:…
+/// reason:…]`, whose returned activity we retain for process lifetime.
+#[cfg(target_os = "macos")]
+fn keep_awake() {
+    use std::ffi::c_void;
+    use std::os::raw::c_char;
+    type Id = *const c_void;
+    type Sel = *const c_void;
+
+    // NSActivityOptions (Foundation): keep App Nap off + screen on + low latency.
+    const USER_INITIATED: u64 = 0x00FF_FFFF;
+    const LATENCY_CRITICAL: u64 = 0xFF_0000_0000;
+    const IDLE_DISPLAY_SLEEP_DISABLED: u64 = 1 << 40;
+    let options = USER_INITIATED | LATENCY_CRITICAL | IDLE_DISPLAY_SLEEP_DISABLED;
+
+    #[link(name = "objc", kind = "dylib")]
+    #[link(name = "Foundation", kind = "framework")]
+    extern "C" {
+        fn objc_getClass(name: *const c_char) -> Id;
+        fn sel_registerName(name: *const c_char) -> Sel;
+        fn objc_msgSend();
+    }
+
+    // SAFETY: standard objc runtime calls; objc_msgSend is transmuted to the
+    // concrete signature per call site (the normal pattern on arm64/x86_64).
+    unsafe {
+        let send: extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc_msgSend as *const ());
+        let send_str: extern "C" fn(Id, Sel, *const c_char) -> Id =
+            std::mem::transmute(objc_msgSend as *const ());
+        let send_begin: extern "C" fn(Id, Sel, u64, Id) -> Id =
+            std::mem::transmute(objc_msgSend as *const ());
+
+        let pi_cls = objc_getClass(c"NSProcessInfo".as_ptr());
+        let ns_cls = objc_getClass(c"NSString".as_ptr());
+        if pi_cls.is_null() || ns_cls.is_null() {
+            return;
+        }
+        let pi = send(pi_cls, sel_registerName(c"processInfo".as_ptr()));
+        let reason = send_str(
+            ns_cls,
+            sel_registerName(c"stringWithUTF8String:".as_ptr()),
+            c"Starfire streaming".as_ptr(),
+        );
+        let activity = send_begin(
+            pi,
+            sel_registerName(c"beginActivityWithOptions:reason:".as_ptr()),
+            options,
+            reason,
+        );
+        // Retain + intentionally leak so the activity lives for the whole run.
+        let _ = send(activity, sel_registerName(c"retain".as_ptr()));
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn keep_awake() {}
+
 /// Auto-submit the pairing PIN to the host's web API (so pairing completes
 /// without touching the host). No-op if web creds aren't provided.
 fn submit_pin(host: &str, pin: &str) {
@@ -243,6 +305,8 @@ impl ApplicationHandler<AppEvent> for App {
 // Top-level init failures (event loop / GPU) are fatal and worth a panic.
 #[allow(clippy::expect_used)]
 fn main() {
+    keep_awake(); // never let App Nap / display sleep throttle the stream
+
     let latest: Arc<Mutex<Option<VideoFrame>>> = Arc::new(Mutex::new(None));
 
     // Headless mode: run the full pair → stream → depacketize → decode loop on

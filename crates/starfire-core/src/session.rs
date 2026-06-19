@@ -83,6 +83,7 @@ pub struct StreamSession {
     video_port: u16,
     audio_port: u16,
     last_ping: std::time::Instant,
+    recv_err_logged: bool,
 }
 
 impl StreamSession {
@@ -139,6 +140,11 @@ impl StreamSession {
         let audio = UdpSocket::bind("0.0.0.0:0")?;
         video.set_read_timeout(Some(Duration::from_millis(4)))?;
 
+        eprintln!(
+            "[stream] video socket {:?} -> host {host}:{} (host streams back to our source port)",
+            video.local_addr().ok(),
+            rs.ports.video_port
+        );
         let mut s = Self {
             client,
             control,
@@ -148,6 +154,7 @@ impl StreamSession {
             video_port: rs.ports.video_port,
             audio_port: rs.ports.audio_port,
             last_ping: Instant::now() - Duration::from_secs(1),
+            recv_err_logged: false,
         };
         s.ping(); // open the return path immediately
         Ok(s)
@@ -169,7 +176,21 @@ impl StreamSession {
         if self.last_ping.elapsed() > std::time::Duration::from_millis(200) {
             self.ping();
         }
-        self.video.recv_from(buf).ok().map(|(n, _)| n)
+        match self.video.recv_from(buf) {
+            Ok((n, _)) => Some(n),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => None,
+            Err(e) => {
+                if !self.recv_err_logged {
+                    eprintln!("[stream] video recv error: {e} (kind {:?})", e.kind());
+                    self.recv_err_logged = true;
+                }
+                None
+            }
+        }
     }
 }
 
