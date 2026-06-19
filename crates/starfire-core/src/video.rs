@@ -144,6 +144,84 @@ mod fixture_tests {
         pkts
     }
 
+    /// Diagnostic: for frame 1 (the IDR), report the data/parity shard geometry
+    /// and whether parity shards were captured (needed to test FEC recovery).
+    #[test]
+    fn fixture_fec_geometry() {
+        let pkts = load_fixture();
+        let mut indices = std::collections::BTreeSet::new();
+        let mut data_shards = 0u16;
+        let mut sizes = std::collections::BTreeSet::new();
+        for p in &pkts {
+            let h = rtp::parse_header(p).expect("parse");
+            if h.frame_index == 1 {
+                indices.insert(h.shard_index);
+                data_shards = h.data_shards;
+                sizes.insert(p.len());
+            }
+        }
+        let max_idx = indices.iter().last().copied().unwrap_or(0);
+        let parity_present: Vec<u16> = indices.iter().copied().filter(|&i| i >= data_shards).collect();
+        println!(
+            "frame 1: data_shards={data_shards} shard_indices={}..={} count={} parity_present={:?} pkt_sizes={:?}",
+            indices.iter().next().copied().unwrap_or(0),
+            max_idx,
+            indices.len(),
+            parity_present,
+            sizes
+        );
+    }
+
+    /// THE decisive FEC test: take frame 1's real captured shards (35 data + 7
+    /// parity), drop a data shard, recover it from parity, and assert it matches
+    /// the real one byte-for-byte. This proves `reed-solomon-erasure`'s matrix is
+    /// compatible with Sunshine's `nanors` encoder (if it fails, we need a
+    /// matrix-matched decoder).
+    ///
+    /// Currently `#[ignore]`d because it FAILS by design: it documents that
+    /// `reed-solomon-erasure`'s matrix is not `nanors`-compatible. Un-ignore it
+    /// as the acceptance test once a matrix-matched decoder is wired into
+    /// `fec::recover`.
+    #[test]
+    #[ignore = "fails by design: needs a nanors-matrix-compatible RS decoder (see fec::recover)"]
+    fn fec_recovers_dropped_data_shard_matching_real_bytes() {
+        const BLOCKSIZE: usize = 1376; // 1408-byte packet − 32-byte header
+        let data_shards = 35usize;
+        let parity_shards = 7usize;
+        let pkts = load_fixture();
+
+        let mut shards: Vec<Option<Vec<u8>>> = vec![None; data_shards + parity_shards];
+        for p in &pkts {
+            let h = rtp::parse_header(p).expect("parse");
+            if h.frame_index == 1 {
+                let idx = h.shard_index as usize;
+                let end = rtp::PAYLOAD_OFFSET + BLOCKSIZE;
+                if idx < shards.len() && end <= p.len() {
+                    shards[idx] = Some(p[rtp::PAYLOAD_OFFSET..end].to_vec());
+                }
+            }
+        }
+        assert!(shards.iter().all(|s| s.is_some()), "need all 42 real shards");
+
+        let dropped = 10usize;
+        let original = shards[dropped].clone().unwrap();
+        shards[dropped] = None;
+
+        let ok = super::fec::recover(data_shards, parity_shards, &mut shards);
+        assert!(ok, "FEC recover() returned false");
+        let recovered = shards[dropped].as_ref().expect("slot filled");
+        let matches = recovered == &original;
+        println!(
+            "FEC recover matches real bytes: {matches} (recovered[..8]={:02x?} original[..8]={:02x?})",
+            &recovered[..8],
+            &original[..8]
+        );
+        assert!(
+            matches,
+            "recovered shard does NOT match Sunshine's bytes -> reed-solomon-erasure matrix != nanors"
+        );
+    }
+
     /// Reassemble the captured stream into frames and validate the output:
     /// the first frame is an IDR whose bytes start with an HEVC VPS NAL, and
     /// subsequent frames reassemble cleanly. This is the no-loss golden path.
@@ -186,11 +264,43 @@ mod fixture_tests {
     }
 }
 
-/// Reed-Solomon FEC — docs/protocol/07 §2, the bit-exact core.
-/// `reed-solomon-erasure` with Sunshine's exact `k`/`m`/shard geometry + matrix
-/// convention, proven by deterministic loss-injection golden tests
-/// (`starfire_testkit::drop_indices`). [CAPTURE-LOCKED]. Stub until captured.
-pub mod fec {}
+/// Reed-Solomon FEC — docs/protocol/07 §2, the bit-exact core. The host
+/// (Sunshine) encodes parity with the `nanors` GF(2^8) Reed-Solomon library;
+/// recovery must use a matrix-compatible decoder or it silently corrupts frames.
+/// Geometry (from the Sunshine server FEC source): data shards `0..k-1` then
+/// parity `k..k+m-1`, all padded to a fixed blocksize; `m = ceil(k*pct/100)`
+/// (floored to a minimum), up to 4 independent FEC blocks per frame.
+pub mod fec {
+    use reed_solomon_erasure::galois_8::ReedSolomon;
+
+    /// Recover missing data shards in one FEC block from the parity shards.
+    /// `shards` has `data_shards + parity_shards` slots (`None` = lost); all
+    /// present shards must be the same byte length. On success every data-shard
+    /// slot is filled. Returns `false` if fewer than `data_shards` are present
+    /// (unrecoverable) or the matrix decode fails.
+    ///
+    /// ⚠️ **MATRIX-INCOMPATIBLE (placeholder).** Proven against real captured
+    /// shards (`fec_recovers_dropped_data_shard_matching_real_bytes`): the
+    /// `reed-solomon-erasure` Vandermonde matrix does **not** match Sunshine's
+    /// `nanors` encoder, so recovered bytes are self-consistent garbage rather
+    /// than the host's real data. The shard geometry here is correct; only the
+    /// GF(2^8) generator matrix must be swapped for a `nanors`-compatible one
+    /// (FFI to nanors, or a pure-Rust port) before this is wired into the
+    /// pipeline. Not yet called by the depacketizer, so dormant for now.
+    pub fn recover(
+        data_shards: usize,
+        parity_shards: usize,
+        shards: &mut [Option<Vec<u8>>],
+    ) -> bool {
+        if shards.iter().filter(|s| s.is_some()).count() < data_shards {
+            return false;
+        }
+        match ReedSolomon::new(data_shards, parity_shards) {
+            Ok(rs) => rs.reconstruct(shards).is_ok(),
+            Err(_) => false,
+        }
+    }
+}
 
 /// Frame reassembly — docs/protocol/07 §3. Reorders fragments by shard index,
 /// assembles frames, and emits a complete [`AccessUnit`]. FEC recovery for

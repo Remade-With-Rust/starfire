@@ -27,6 +27,7 @@ rustls = { workspace = true }    # mTLS HTTPS client for paired endpoints (F3)
 rustls-pki-types = { workspace = true } # PEM cert/key parsing (F3)
 rusty_enet = { workspace = true } # reliable-UDP control channel (F6)
 aes-gcm = { workspace = true }   # AES-GCM control/input/media encryption (F6+)
+reed-solomon-erasure = { workspace = true } # video/audio FEC recovery (F7)
 # Further protocol-layer deps are added as each layer lands (docs/05-build-plan.md):
 #   reed-solomon-erasure, aes-gcm, rusty_enet, rcgen, rsa, x509-parser, rustls…
 
