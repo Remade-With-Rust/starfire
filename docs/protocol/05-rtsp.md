@@ -19,8 +19,22 @@ everything the media planes need. Confirmed by `live_rtsp_handshake` + golden te
   `RtspClient` opens a fresh socket per request (CSeq still increments globally).
 - **No `Content-Length`** on responses — body runs to connection close (read to EOF).
 - **`X-GS-ClientVersion`** header required, else the host RSTs the connection.
-- **ANNOUNCE is not required** — `PLAY` after SETUP returns 200; the host uses the
-  `/launch` config. A minimal ANNOUNCE got a clean 400.
+- **ANNOUNCE _is_ required** — it **arms the data plane**. (An earlier note here
+  said otherwise: PLAY 200s without it, but the host then never streams.) The
+  body+headers must be sent in **one `write`** (the host reads the request in a
+  single pass; a separate body write lands in a later segment and is missed).
+
+### ANNOUNCE — the mandatory SDP attributes
+Sunshine's ANNOUNCE handler `.at()`s a fixed set of SDP attributes and returns
+**400** (no logged reason) if *any* is missing. [SOURCE: rtsp.cpp `cmd_announce`]
+The complete mandatory set for 2026.516 spans three namespaces; the ones newer
+than the classic GameStream SDP (and easy to miss) are:
+`x-nv-video[0].clientRefreshRateX100`, `x-nv-video[0].maxNumReferenceFrames`,
+`x-ml-general.featureFlags`, `x-ml-video.configuredBitrateKbps`,
+`x-ss-general.encryptionEnabled`, `x-ss-video[0].chromaSamplingType`,
+`x-ss-video[0].intraRefresh`. Built by `RtspClient::build_announce_sdp`.
+- `a=x-ss-general.encryptionEnabled:0` → **plaintext** video/audio/control (valid
+  while the host's encryption mode is not MANDATORY for this client).
 
 ### The handshake
 | Step | Request | Yields |
@@ -28,17 +42,20 @@ everything the media planes need. Confirmed by `live_rtsp_handshake` + golden te
 | OPTIONS | `OPTIONS rtsp://host:48010` | liveness (`CSeq` only) |
 | DESCRIBE | + `Accept` | SDP: `x-ss-general.{featureFlags,encryptionSupported,encryptionRequested}`, `sprop-parameter-sets`, `fmtp:97 surround-params` |
 | SETUP×3 | `…/streamid={audio,video,control}` + `Transport: unicast;X-GS-ClientPort=…` | `Transport: server_port=<n>`, `Session`, `X-SS-Ping-Payload` (a/v), `X-SS-Connect-Data` (control) |
+| ANNOUNCE | + `Content-type: application/sdp` + the mandatory-attr SDP | **200 arms the session** (400 = a missing attr) |
 | PLAY | + `Session` | 200 → host ready to stream |
 
-### ⚠️ Media encryption — key finding for F6/F7
-The DESCRIBE SDP advertises **`encryptionRequested:1`** (supported `:5`). The host
-requests media encryption (AES-GCM, RI key from `/launch`). The exact bit→stream
-mapping + nonce/IV are **[CAPTURE-LOCKED]**, resolved when control/video land.
+### Media encryption — resolved
+The DESCRIBE advertises `encryptionRequested:1`, but that is the host's *request*,
+not a hard requirement when its encryption mode is not MANDATORY. The client
+chooses in the ANNOUNCE via `x-ss-general.encryptionEnabled`; Starfire sends `0`
+and gets **plaintext** HEVC + control (no AES-GCM). See [06-control-enet.md] for
+the data-plane bring-up (control connect → ping → video).
 
-### Still ahead (with F6/F7)
-- The **ping payload** must be sent to each media UDP port to open the return path.
-- The **`X-SS-Connect-Data`** seeds the ENet control connect.
-- `surround-params` / `sprop-parameter-sets` decode for audio layout + video config.
+### `X-SS-Ping-Payload` note
+The header is the hex of the host's random ping bytes, but Starfire sends the
+legacy literal `"PING"` to the media ports (it advertises `featureFlags:0`, so
+the host accepts it). Details in [06-control-enet.md].
 
 ## Goal
 

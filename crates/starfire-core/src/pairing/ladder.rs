@@ -604,7 +604,7 @@ mod tests {
         // Fresh client (CSeq restarts) for the real handshake.
         let mut rtsp =
             RtspClient::new(&session.rtsp_url, Duration::from_secs(10)).expect("client2");
-        let rs = rtsp.handshake().expect("rtsp handshake");
+        let rs = rtsp.handshake(&crate::rtsp::AnnounceConfig::default()).expect("rtsp handshake");
         println!("session: {rs:?}");
         assert_eq!(rs.ports.video_port, 47998);
         assert_eq!(rs.ports.audio_port, 48000);
@@ -633,7 +633,7 @@ mod tests {
             .launch(&desktop.id, &LaunchConfig::default())
             .expect("launch");
         let mut rtsp = RtspClient::new(&session.rtsp_url, Duration::from_secs(10)).expect("client");
-        let rs = rtsp.handshake().expect("handshake");
+        let rs = rtsp.handshake(&crate::rtsp::AnnounceConfig::default()).expect("handshake");
         println!(
             "SESSION HELD: video={} control={} audio={} — holding 25s",
             rs.ports.video_port, rs.ports.control_port, rs.ports.audio_port
@@ -663,13 +663,15 @@ mod tests {
         client.cancel().ok();
     }
 
-    /// F7/data-plane exploration: pair → launch → RTSP handshake → bind the
-    /// advertised client port, ping the video/audio ports, and see if RTP flows
-    /// (which is what fully activates the host's encoder + control port).
+    /// F6+F7 full data plane: pair → launch → RTSP handshake (arms the session)
+    /// → ENet control connect (this is what sets the host's `localAddress`, the
+    /// source for RTP sends — without it every send fails WSAEINVAL) → ping the
+    /// media ports with the legacy `"PING"` → receive plaintext HEVC video.
     /// Run with `STARFIRE_TEST_HOST=<lan-ip> -- --ignored live_explore_video --nocapture`.
     #[test]
     #[ignore = "requires a running Sunshine host reachable by LAN IP"]
     fn live_explore_video() {
+        use crate::control::ControlChannel;
         use crate::launch::LaunchConfig;
         use crate::rtsp::RtspClient;
         use std::net::UdpSocket;
@@ -683,34 +685,65 @@ mod tests {
             .launch(&desktop.id, &LaunchConfig::default())
             .expect("launch");
         let mut rtsp = RtspClient::new(&session.rtsp_url, Duration::from_secs(10)).expect("client");
-        let rs = rtsp.handshake().expect("handshake");
+        let rs = rtsp.handshake(&crate::rtsp::AnnounceConfig::default()).expect("handshake");
         println!(
-            "host={host} video={} audio={} control={} ping={:02x?}",
-            rs.ports.video_port, rs.ports.audio_port, rs.ports.control_port, rs.ping_payload
+            "host={host} video={} audio={} control={}",
+            rs.ports.video_port, rs.ports.audio_port, rs.ports.control_port
         );
 
-        // Ephemeral socket per stream (matches Moonlight). The ping is the literal
-        // X-SS-Ping-Payload string + a 4-byte big-endian counter.
+        // Connect the ENet control channel FIRST. The host derives its RTP source
+        // address (localAddress) from this control peer; until it connects, the
+        // encoder's sends fail with WSAEINVAL. Now that ANNOUNCE armed the
+        // session, the connect should complete (it timed out pre-arming).
+        let control_server = format!("{host}:{}", rs.ports.control_port).parse().unwrap();
+        let mut ctrl = {
+            let mut c = None;
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_secs(6) {
+                match ControlChannel::connect(
+                    control_server,
+                    rs.control_connect_data,
+                    1,
+                    0,
+                    Duration::from_secs(1),
+                ) {
+                    Ok(ch) => {
+                        println!("ENET control connected after {:?}", start.elapsed());
+                        c = Some(ch);
+                        break;
+                    }
+                    Err(e) => println!("control connect retry: {e}"),
+                }
+            }
+            c.expect("ENet control connect (session armed but control did not connect)")
+        };
+
+        // Ephemeral socket per stream; ping is the legacy literal "PING" (4 bytes)
+        // since featureFlags=0 → no ML_FF_SESSION_ID_V1. Both video AND audio must
+        // be pinged or the audio timeout tears the session down.
         let video = UdpSocket::bind("0.0.0.0:0").expect("bind video");
+        let audio = UdpSocket::bind("0.0.0.0:0").expect("bind audio");
         video
-            .set_read_timeout(Some(Duration::from_millis(100)))
+            .set_read_timeout(Some(Duration::from_millis(20)))
             .unwrap();
         let video_server = format!("{host}:{}", rs.ports.video_port);
+        let audio_server = format!("{host}:{}", rs.ports.audio_port);
 
         let mut buf = [0u8; 2048];
-        let (mut got, mut seq, mut hevc) = (0usize, 0u32, false);
+        let (mut got, mut hevc, mut bytes) = (0usize, false, 0usize);
         let mut last_ping = Instant::now() - Duration::from_secs(1);
         let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(6) {
+        while start.elapsed() < Duration::from_secs(8) {
+            // Keep the control peer alive (drives ENet keepalive/acks).
+            let _ = ctrl.poll();
             if last_ping.elapsed() > Duration::from_millis(200) {
-                seq += 1;
-                let mut p = rs.ping_payload.clone();
-                p.extend_from_slice(&seq.to_be_bytes());
-                let _ = video.send_to(&p, &video_server);
+                let _ = video.send_to(b"PING", &video_server);
+                let _ = audio.send_to(b"PING", &audio_server);
                 last_ping = Instant::now();
             }
             if let Ok((n, _)) = video.recv_from(&mut buf) {
                 got += 1;
+                bytes += n;
                 if got <= 5 {
                     println!("RTP {n}B head={:02x?}", &buf[..n.min(40)]);
                 }
@@ -720,7 +753,7 @@ mod tests {
                 }
             }
         }
-        println!("received {got} video packet(s); hevc_seen={hevc}");
+        println!("received {got} video packet(s), {bytes} bytes; hevc_seen={hevc}");
         client.cancel().ok();
         assert!(got > 0, "expected video RTP from the host");
     }
@@ -744,7 +777,7 @@ mod tests {
             .launch(&desktop.id, &LaunchConfig::default())
             .expect("launch");
         let mut rtsp = RtspClient::new(&session.rtsp_url, Duration::from_secs(10)).expect("client");
-        let rs = rtsp.handshake().expect("handshake");
+        let rs = rtsp.handshake(&crate::rtsp::AnnounceConfig::default()).expect("handshake");
         println!(
             "control_port={} connect_data={} ping_payload={:02x?}",
             rs.ports.control_port, rs.control_connect_data, rs.ping_payload
@@ -806,18 +839,16 @@ mod tests {
         client.cancel().ok();
     }
 
-    /// F6/F7 arming exploration: pair → launch → OPTIONS/DESCRIBE/SETUP →
-    /// **ANNOUNCE** (classic GameStream SDP) → PLAY, printing each response so we
-    /// can iterate the ANNOUNCE until the host arms the data plane. Run with
-    /// `STARFIRE_TEST_HOST=<lan-ip> -- --ignored live_explore_announce --nocapture`.
+    /// Focused F6/F7 arming check: pair → launch → full handshake (which now
+    /// includes the ANNOUNCE that arms the session) and assert it reaches PLAY.
+    /// The complete data plane (control + video) is covered by `live_explore_video`.
+    /// Run with `STARFIRE_TEST_HOST=<lan-ip> -- --ignored live_explore_announce --nocapture`.
     #[test]
     #[ignore = "requires a running Sunshine host"]
     fn live_explore_announce() {
         use crate::launch::LaunchConfig;
-        use crate::rtsp::RtspClient;
+        use crate::rtsp::{AnnounceConfig, RtspClient};
 
-        const GS: (&str, &str) = ("X-GS-ClientVersion", "14");
-        let host = test_host();
         let client = pair_and_finalize();
         let apps = client.applist().expect("applist");
         let desktop = apps.iter().find(|a| a.title == "Desktop").expect("Desktop");
@@ -826,92 +857,12 @@ mod tests {
             .expect("launch");
 
         let mut rtsp = RtspClient::new(&session.rtsp_url, Duration::from_secs(10)).expect("client");
-        rtsp.request("OPTIONS", None, &[GS], b"").expect("OPTIONS");
-        rtsp.request("DESCRIBE", None, &[GS], b"")
-            .expect("DESCRIBE");
-        let mut session_id = String::new();
-        for s in ["audio", "video", "control"] {
-            let uri = format!("{}/streamid={s}", rtsp.target());
-            let r = rtsp
-                .request(
-                    "SETUP",
-                    Some(&uri),
-                    &[("Transport", "unicast;X-GS-ClientPort=50000-50001"), GS],
-                    b"",
-                )
-                .expect("SETUP");
-            if let Some(sess) = r.header("Session") {
-                session_id = sess.split(';').next().unwrap_or(sess).trim().to_string();
-            }
-        }
-
-        // Classic GameStream ANNOUNCE SDP (public protocol; not Moonlight source).
-        let c = LaunchConfig::default();
-        let kbps = 10000;
-        let sdp = [
-            "v=0".to_string(),
-            format!("o=android 0 14 IN IPv4 {host}"),
-            "s=NVIDIA Streaming Client".to_string(),
-            format!("a=x-nv-video[0].clientViewportWd:{}", c.width),
-            format!("a=x-nv-video[0].clientViewportHt:{}", c.height),
-            format!("a=x-nv-video[0].maxFPS:{}", c.fps),
-            "a=x-nv-video[0].packetSize:1392".to_string(),
-            "a=x-nv-video[0].rateControlMode:4".to_string(),
-            "a=x-nv-video[0].timeoutLengthMs:7000".to_string(),
-            "a=x-nv-video[0].framesWithInvalidRefThreshold:0".to_string(),
-            format!("a=x-nv-video[0].initialBitrateKbps:{kbps}"),
-            format!("a=x-nv-video[0].initialPeakBitrateKbps:{kbps}"),
-            format!("a=x-nv-vqos[0].bw.minimumBitrateKbps:{kbps}"),
-            format!("a=x-nv-vqos[0].bw.maximumBitrateKbps:{kbps}"),
-            "a=x-nv-vqos[0].fec.enable:1".to_string(),
-            "a=x-nv-vqos[0].fec.numSrcPackets:0".to_string(),
-            "a=x-nv-vqos[0].fec.repairPercent:50".to_string(),
-            "a=x-nv-vqos[0].fec.repairMaxPercent:100".to_string(),
-            "a=x-nv-vqos[0].fec.minRequiredFecPackets:2".to_string(),
-            "a=x-nv-vqos[0].drc.enable:0".to_string(),
-            "a=x-nv-vqos[0].qosTrafficType:5".to_string(),
-            "a=x-nv-aqos.qosTrafficType:4".to_string(),
-            "a=x-nv-aqos.packetDuration:5".to_string(),
-            "a=x-nv-aqos.coupledAq:1".to_string(),
-            format!("a=x-nv-general.serverAddress:{host}"),
-            "a=x-nv-general.featureFlags:135".to_string(),
-            "a=x-nv-general.useReliableUdp:1".to_string(),
-            "a=x-nv-vqos[0].bitStreamFormat:1".to_string(),
-            "a=x-nv-video[0].videoEncoderSlicesPerFrame:1".to_string(),
-            "a=x-nv-video[0].dynamicRangeMode:0".to_string(),
-            "a=x-nv-clientSupportHevc:1".to_string(),
-            "a=x-nv-audio.surround.numChannels:2".to_string(),
-            "a=x-nv-audio.surround.channelMask:3".to_string(),
-            "a=x-nv-audio.surround.enable:0".to_string(),
-            "a=x-nv-audio.surround.AudioQuality:0".to_string(),
-            "t=0 0".to_string(),
-            "m=video 47998 RTP/AVP 96".to_string(),
-            "".to_string(),
-        ]
-        .join("\r\n");
-
-        match rtsp.request(
-            "ANNOUNCE",
-            None,
-            &[
-                ("Content-type", "application/sdp"),
-                ("Session", session_id.as_str()),
-                GS,
-            ],
-            sdp.as_bytes(),
-        ) {
-            Ok(r) => println!(
-                "===== ANNOUNCE {} =====\nheaders={:?}\nbody={}",
-                r.status,
-                r.headers,
-                String::from_utf8_lossy(&r.body)
-            ),
-            Err(e) => println!("ANNOUNCE err: {e}"),
-        }
-        match rtsp.request("PLAY", None, &[("Session", session_id.as_str()), GS], b"") {
-            Ok(r) => println!("===== PLAY {} =====", r.status),
-            Err(e) => println!("PLAY err: {e}"),
-        }
+        // handshake() runs OPTIONS/DESCRIBE/SETUP×3/ANNOUNCE/PLAY; ANNOUNCE 200 is
+        // required for the host to arm — a missing mandatory SDP attr is a 400.
+        let rs = rtsp
+            .handshake(&AnnounceConfig::default())
+            .expect("handshake (ANNOUNCE must be 200)");
+        println!("ARMED: session={} ports={:?}", rs.session_id, rs.ports);
         client.cancel().ok();
     }
 }

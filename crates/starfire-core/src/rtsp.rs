@@ -59,6 +59,32 @@ impl SdpInfo {
     }
 }
 
+/// Stream parameters carried into the RTSP `ANNOUNCE` SDP. Mirrors the launch
+/// `mode`; the values must be self-consistent with what `/launch` was given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnnounceConfig {
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub bitrate_kbps: u32,
+    /// `x-ss-general.encryptionEnabled` bitmask. 0 = fully plaintext video +
+    /// audio + control (only valid when the host's encryption mode is not
+    /// MANDATORY for this client, e.g. `lan_encryption_mode = 0`).
+    pub encryption_enabled: u32,
+}
+
+impl Default for AnnounceConfig {
+    fn default() -> Self {
+        Self {
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            bitrate_kbps: 10_000,
+            encryption_enabled: 0,
+        }
+    }
+}
+
 /// The result of the RTSP handshake — everything the media planes (F6/F7/F8)
 /// need to bind sockets and start streaming.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,11 +194,90 @@ impl RtspClient {
         read_response(&mut stream)
     }
 
-    /// Walk the full RTSP handshake — `OPTIONS → DESCRIBE → SETUP×3 → PLAY` — and
-    /// return the session binding. Validated live against Sunshine; ANNOUNCE is
-    /// not required (the host uses the `/launch` config). After this the host is
-    /// ready to stream once the client pings the media ports.
-    pub fn handshake(&mut self) -> crate::Result<RtspSession> {
+    /// Build the `ANNOUNCE` SDP body. Sunshine's ANNOUNCE handler `.at()`s a fixed
+    /// set of attributes (across the `x-nv-*`, `x-ml-*`, `x-ss-*` namespaces) and
+    /// returns 400 if any are missing — this list is the complete mandatory set
+    /// for Sunshine 2026.516. The `x-ss-general.encryptionEnabled` value selects
+    /// the media-plane encryption (0 = plaintext). [SOURCE: Sunshine rtsp.cpp]
+    fn build_announce_sdp(&self, cfg: &AnnounceConfig) -> String {
+        let host = &self.host;
+        let kbps = cfg.bitrate_kbps;
+        [
+            "v=0".to_string(),
+            format!("o=android 0 14 IN IPv4 {host}"),
+            "s=NVIDIA Streaming Client".to_string(),
+            "t=0 0".to_string(),
+            format!("a=x-nv-video[0].clientViewportWd:{}", cfg.width),
+            format!("a=x-nv-video[0].clientViewportHt:{}", cfg.height),
+            format!("a=x-nv-video[0].maxFPS:{}", cfg.fps),
+            format!("a=x-nv-video[0].clientRefreshRateX100:{}", cfg.fps * 100),
+            "a=x-nv-video[0].packetSize:1392".to_string(),
+            "a=x-nv-video[0].rateControlMode:4".to_string(),
+            "a=x-nv-video[0].timeoutLengthMs:7000".to_string(),
+            "a=x-nv-video[0].framesWithInvalidRefThreshold:0".to_string(),
+            format!("a=x-nv-video[0].initialBitrateKbps:{kbps}"),
+            format!("a=x-nv-video[0].initialPeakBitrateKbps:{kbps}"),
+            "a=x-nv-video[0].maxNumReferenceFrames:1".to_string(),
+            "a=x-nv-video[0].videoEncoderSlicesPerFrame:1".to_string(),
+            "a=x-nv-video[0].encoderCscMode:0".to_string(),
+            "a=x-nv-video[0].dynamicRangeMode:0".to_string(),
+            format!("a=x-nv-vqos[0].bw.minimumBitrateKbps:{kbps}"),
+            format!("a=x-nv-vqos[0].bw.maximumBitrateKbps:{kbps}"),
+            "a=x-nv-vqos[0].fec.enable:1".to_string(),
+            "a=x-nv-vqos[0].fec.numSrcPackets:0".to_string(),
+            "a=x-nv-vqos[0].fec.repairPercent:50".to_string(),
+            "a=x-nv-vqos[0].fec.repairMaxPercent:100".to_string(),
+            "a=x-nv-vqos[0].fec.minRequiredFecPackets:2".to_string(),
+            "a=x-nv-vqos[0].drc.enable:0".to_string(),
+            "a=x-nv-vqos[0].qosTrafficType:5".to_string(),
+            "a=x-nv-vqos[0].bitStreamFormat:1".to_string(),
+            "a=x-nv-aqos.qosTrafficType:4".to_string(),
+            "a=x-nv-aqos.packetDuration:5".to_string(),
+            "a=x-nv-aqos.coupledAq:1".to_string(),
+            format!("a=x-nv-general.serverAddress:{host}"),
+            "a=x-nv-general.featureFlags:135".to_string(),
+            "a=x-nv-general.useReliableUdp:1".to_string(),
+            "a=x-nv-clientSupportHevc:1".to_string(),
+            "a=x-nv-audio.surround.numChannels:2".to_string(),
+            "a=x-nv-audio.surround.channelMask:3".to_string(),
+            "a=x-nv-audio.surround.enable:0".to_string(),
+            "a=x-nv-audio.surround.AudioQuality:0".to_string(),
+            "a=x-ml-general.featureFlags:0".to_string(),
+            format!("a=x-ml-video.configuredBitrateKbps:{kbps}"),
+            format!("a=x-ss-general.encryptionEnabled:{}", cfg.encryption_enabled),
+            "a=x-ss-video[0].chromaSamplingType:0".to_string(),
+            "a=x-ss-video[0].intraRefresh:0".to_string(),
+            String::new(),
+        ]
+        .join("\r\n")
+    }
+
+    /// Send `ANNOUNCE` with the stream config SDP. Arms the host's session so it
+    /// will start streaming once the client pings the media ports. Must run after
+    /// SETUP (needs the session id) and before PLAY.
+    pub fn announce(&mut self, session_id: &str, cfg: &AnnounceConfig) -> crate::Result<()> {
+        const GS: (&str, &str) = ("X-GS-ClientVersion", "14");
+        let sdp = self.build_announce_sdp(cfg);
+        let resp = self.request(
+            "ANNOUNCE",
+            None,
+            &[("Content-type", "application/sdp"), ("Session", session_id), GS],
+            sdp.as_bytes(),
+        )?;
+        if resp.status != 200 {
+            return Err(crate::Error::Protocol(format!(
+                "ANNOUNCE: RTSP {} (SDP missing a mandatory attribute?)",
+                resp.status
+            )));
+        }
+        Ok(())
+    }
+
+    /// Walk the full RTSP handshake — `OPTIONS → DESCRIBE → SETUP×3 → ANNOUNCE →
+    /// PLAY` — and return the session binding. The ANNOUNCE arms the host's
+    /// session (without it, PLAY 200s but the host never streams). After this the
+    /// host is ready to stream once the client pings the media ports.
+    pub fn handshake(&mut self, cfg: &AnnounceConfig) -> crate::Result<RtspSession> {
         const GS: (&str, &str) = ("X-GS-ClientVersion", "14");
         let target = self.target.clone();
 
@@ -210,13 +315,19 @@ impl RtspClient {
                 session_id = s.split(';').next().unwrap_or(s).trim().to_string();
             }
             if let Some(p) = resp.header("X-SS-Ping-Payload") {
-                // Sent literally (the ASCII header string), not hex-decoded.
-                ping_payload = p.as_bytes().to_vec();
+                // The header is the hex encoding of the host's random ping bytes;
+                // the client must send the DECODED bytes to the media UDP ports
+                // (Sunshine substring-matches them). Confirmed live: sending the
+                // literal hex string instead → "Initial Ping Timeout".
+                ping_payload = crate::hex::decode(p.trim()).unwrap_or_else(|_| p.as_bytes().to_vec());
             }
             if let Some(c) = resp.header("X-SS-Connect-Data") {
                 control_connect_data = c.trim().parse().unwrap_or(0);
             }
         }
+
+        // ANNOUNCE arms the session (the host won't stream without it).
+        self.announce(&session_id, cfg)?;
 
         let play = self.request("PLAY", None, &[("Session", session_id.as_str()), GS], b"")?;
         if play.status != 200 {

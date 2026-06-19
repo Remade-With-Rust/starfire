@@ -1,12 +1,53 @@
 # Protocol 06 — Control Stream (ENet over UDP)
 
-> Provenance: observation against **Sunshine 2026.516.143833**. Clean-room. Crate:
-> `rusty_enet` (MIT). AES-GCM framing + message type IDs are **[CAPTURE-LOCKED]**.
+> Provenance: observation against **Sunshine 2026.516.143833**, plus a one-time,
+> owner-approved read of the **Sunshine server** source (`rtsp.cpp`/`stream.cpp`/
+> `platform/windows/misc.cpp`) for the data-plane wire format. Never Moonlight
+> (the client). Clean-room w.r.t. the client. Crate: `rusty_enet` (MIT).
 
-## 🟡 Status — transport implemented; data-plane validation blocked
-`starfire_core::control::ControlChannel` is the ENet transport (connect with the
-RTSP `X-SS-Connect-Data` token, poll/send, AES-GCM to follow). It compiles and is
-structurally complete, but **is not yet live-validated** — see the blocker below.
+## ✅ Status — data plane LIVE (control + video), 2026-06-19
+The ENet control channel **connects** and the full data plane streams **plaintext
+HEVC** end-to-end, validated from a real Mac client against a Windows Sunshine
+host (`live_explore_video`: 2060 video packets / 2.9 MB in 8 s, HEVC NALs seen).
+
+**The arming sequence that makes it work (order matters):**
+1. RTSP `OPTIONS → DESCRIBE → SETUP×3 → ANNOUNCE → PLAY`. The **ANNOUNCE** is
+   mandatory to arm the session (see [05-rtsp.md]). Without it PLAY 200s but the
+   host never streams and the ENet `connect` gets no VERIFY.
+2. **ENet control `connect`** to the control port with the `X-SS-Connect-Data`
+   token. This is what sets the host's `session->localAddress` — derived from the
+   control peer's *server-side* socket address. [SOURCE: stream.cpp
+   `control_server_t::get_session()`]
+3. **Ping** the video+audio UDP ports (see below). The host records each stream's
+   client peer from the ping's source, then starts capture.
+4. Plaintext HEVC RTP flows to the ping's source socket.
+
+**Why control must connect _before_ video can flow:** the host sends RTP with
+`WSASendMsg` using `localAddress` as the IP_PKTINFO source. Until the control
+peer connects, `localAddress` is unset and **every send fails `WSAEINVAL`
+(10022)** — the encoder runs but no packets leave the host. This is the single
+biggest non-obvious dependency in the whole data plane.
+
+**Encryption:** with `lan_encryption_mode=0` and the ANNOUNCE carrying
+`a=x-ss-general.encryptionEnabled:0`, control + video + audio are all
+**plaintext** (no AES-GCM) — matching the "less overhead" goal. (Note: the
+DESCRIBE still advertises `encryptionRequested:1`, but that is the host's
+*request*, not a requirement, when its mode is not MANDATORY.)
+
+### The ping (hole-punch)
+`recv_ping` accepts two formats [SOURCE: stream.cpp]:
+- **legacy**: the datagram must equal the literal `"PING"` (4 bytes) — used when
+  `mlFeatureFlags` lacks `ML_FF_SESSION_ID_V1`;
+- **new**: the datagram must *contain* `av_ping_payload` (the `X-SS-Ping-Payload`).
+
+Starfire sends `a=x-ml-general.featureFlags:0` (no `ML_FF_SESSION_ID_V1`), so it
+uses the simple legacy `"PING"`. Both video and audio ports must be pinged or the
+audio timeout tears the session down.
+
+### Historical note — earlier blockers (now resolved)
+The transport below was structurally complete long before it was live; the data
+plane was blocked first by environment (same-machine), then by the missing
+ANNOUNCE (arming), the wrong ping payload, and the `localAddress` ordering above.
 
 ### ⛔ Blocker — same-machine data plane (environment, not protocol)
 Sunshine will **not bring up the streaming data plane** (encoder + media/control
