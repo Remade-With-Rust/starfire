@@ -729,6 +729,10 @@ mod tests {
         let video_server = format!("{host}:{}", rs.ports.video_port);
         let audio_server = format!("{host}:{}", rs.ports.audio_port);
 
+        // Optionally dump received datagrams (u16-LE length prefix + bytes) to a
+        // fixture for offline depacketizer development. Capped so it stays small.
+        let mut fixture: Option<Vec<u8>> = std::env::var("SF_VIDEO_FIXTURE").ok().map(|_| Vec::new());
+
         let mut buf = [0u8; 2048];
         let (mut got, mut hevc, mut bytes) = (0usize, false, 0usize);
         let mut last_ping = Instant::now() - Duration::from_secs(1);
@@ -751,7 +755,17 @@ mod tests {
                 if buf[..n].windows(2).any(|w| w == [0x40, 0x01]) {
                     hevc = true;
                 }
+                if let Some(f) = fixture.as_mut() {
+                    if f.len() < 1_500_000 {
+                        f.extend_from_slice(&(n as u16).to_le_bytes());
+                        f.extend_from_slice(&buf[..n]);
+                    }
+                }
             }
+        }
+        if let (Some(f), Ok(path)) = (fixture, std::env::var("SF_VIDEO_FIXTURE")) {
+            std::fs::write(&path, &f).expect("write fixture");
+            println!("wrote {} bytes of video fixture to {path}", f.len());
         }
         println!("received {got} video packet(s), {bytes} bytes; hevc_seen={hevc}");
         client.cancel().ok();
