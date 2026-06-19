@@ -155,13 +155,16 @@ impl RtspClient {
         }
         req.push_str("\r\n");
 
+        // Send headers + body in ONE write — Sunshine's RTSP reads the request in
+        // a single pass, so a separate body write lands in a later segment and the
+        // host sees an empty payload (confirmed via its debug log).
+        let mut packet = req.into_bytes();
+        packet.extend_from_slice(body);
+
         let mut stream = TcpStream::connect((self.host.as_str(), self.port))?;
         stream.set_read_timeout(Some(self.timeout))?;
         stream.set_write_timeout(Some(self.timeout))?;
-        stream.write_all(req.as_bytes())?;
-        if !body.is_empty() {
-            stream.write_all(body)?;
-        }
+        stream.write_all(&packet)?;
         read_response(&mut stream)
     }
 

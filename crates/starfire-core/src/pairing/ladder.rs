@@ -805,4 +805,113 @@ mod tests {
         println!("received {count} control message(s)");
         client.cancel().ok();
     }
+
+    /// F6/F7 arming exploration: pair → launch → OPTIONS/DESCRIBE/SETUP →
+    /// **ANNOUNCE** (classic GameStream SDP) → PLAY, printing each response so we
+    /// can iterate the ANNOUNCE until the host arms the data plane. Run with
+    /// `STARFIRE_TEST_HOST=<lan-ip> -- --ignored live_explore_announce --nocapture`.
+    #[test]
+    #[ignore = "requires a running Sunshine host"]
+    fn live_explore_announce() {
+        use crate::launch::LaunchConfig;
+        use crate::rtsp::RtspClient;
+
+        const GS: (&str, &str) = ("X-GS-ClientVersion", "14");
+        let host = test_host();
+        let client = pair_and_finalize();
+        let apps = client.applist().expect("applist");
+        let desktop = apps.iter().find(|a| a.title == "Desktop").expect("Desktop");
+        let session = client
+            .launch(&desktop.id, &LaunchConfig::default())
+            .expect("launch");
+
+        let mut rtsp = RtspClient::new(&session.rtsp_url, Duration::from_secs(10)).expect("client");
+        rtsp.request("OPTIONS", None, &[GS], b"").expect("OPTIONS");
+        rtsp.request("DESCRIBE", None, &[GS], b"")
+            .expect("DESCRIBE");
+        let mut session_id = String::new();
+        for s in ["audio", "video", "control"] {
+            let uri = format!("{}/streamid={s}", rtsp.target());
+            let r = rtsp
+                .request(
+                    "SETUP",
+                    Some(&uri),
+                    &[("Transport", "unicast;X-GS-ClientPort=50000-50001"), GS],
+                    b"",
+                )
+                .expect("SETUP");
+            if let Some(sess) = r.header("Session") {
+                session_id = sess.split(';').next().unwrap_or(sess).trim().to_string();
+            }
+        }
+
+        // Classic GameStream ANNOUNCE SDP (public protocol; not Moonlight source).
+        let c = LaunchConfig::default();
+        let kbps = 10000;
+        let sdp = [
+            "v=0".to_string(),
+            format!("o=android 0 14 IN IPv4 {host}"),
+            "s=NVIDIA Streaming Client".to_string(),
+            format!("a=x-nv-video[0].clientViewportWd:{}", c.width),
+            format!("a=x-nv-video[0].clientViewportHt:{}", c.height),
+            format!("a=x-nv-video[0].maxFPS:{}", c.fps),
+            "a=x-nv-video[0].packetSize:1392".to_string(),
+            "a=x-nv-video[0].rateControlMode:4".to_string(),
+            "a=x-nv-video[0].timeoutLengthMs:7000".to_string(),
+            "a=x-nv-video[0].framesWithInvalidRefThreshold:0".to_string(),
+            format!("a=x-nv-video[0].initialBitrateKbps:{kbps}"),
+            format!("a=x-nv-video[0].initialPeakBitrateKbps:{kbps}"),
+            format!("a=x-nv-vqos[0].bw.minimumBitrateKbps:{kbps}"),
+            format!("a=x-nv-vqos[0].bw.maximumBitrateKbps:{kbps}"),
+            "a=x-nv-vqos[0].fec.enable:1".to_string(),
+            "a=x-nv-vqos[0].fec.numSrcPackets:0".to_string(),
+            "a=x-nv-vqos[0].fec.repairPercent:50".to_string(),
+            "a=x-nv-vqos[0].fec.repairMaxPercent:100".to_string(),
+            "a=x-nv-vqos[0].fec.minRequiredFecPackets:2".to_string(),
+            "a=x-nv-vqos[0].drc.enable:0".to_string(),
+            "a=x-nv-vqos[0].qosTrafficType:5".to_string(),
+            "a=x-nv-aqos.qosTrafficType:4".to_string(),
+            "a=x-nv-aqos.packetDuration:5".to_string(),
+            "a=x-nv-aqos.coupledAq:1".to_string(),
+            format!("a=x-nv-general.serverAddress:{host}"),
+            "a=x-nv-general.featureFlags:135".to_string(),
+            "a=x-nv-general.useReliableUdp:1".to_string(),
+            "a=x-nv-vqos[0].bitStreamFormat:1".to_string(),
+            "a=x-nv-video[0].videoEncoderSlicesPerFrame:1".to_string(),
+            "a=x-nv-video[0].dynamicRangeMode:0".to_string(),
+            "a=x-nv-clientSupportHevc:1".to_string(),
+            "a=x-nv-audio.surround.numChannels:2".to_string(),
+            "a=x-nv-audio.surround.channelMask:3".to_string(),
+            "a=x-nv-audio.surround.enable:0".to_string(),
+            "a=x-nv-audio.surround.AudioQuality:0".to_string(),
+            "t=0 0".to_string(),
+            "m=video 47998 RTP/AVP 96".to_string(),
+            "".to_string(),
+        ]
+        .join("\r\n");
+
+        match rtsp.request(
+            "ANNOUNCE",
+            None,
+            &[
+                ("Content-type", "application/sdp"),
+                ("Session", session_id.as_str()),
+                GS,
+            ],
+            sdp.as_bytes(),
+        ) {
+            Ok(r) => println!(
+                "===== ANNOUNCE {} =====\nheaders={:?}\nbody={}",
+                r.status,
+                r.headers,
+                String::from_utf8_lossy(&r.body)
+            ),
+            Err(e) => println!("ANNOUNCE err: {e}"),
+        }
+        match rtsp.request("PLAY", None, &[("Session", session_id.as_str()), GS], b"") {
+            Ok(r) => println!("===== PLAY {} =====", r.status),
+            Err(e) => println!("PLAY err: {e}"),
+        }
+        client.cancel().ok();
+    }
 }
