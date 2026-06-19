@@ -18,7 +18,8 @@ starfire-decode = { path = "../starfire-decode" }
 starfire-render = { path = "../starfire-render" }
 starfire-audio = { path = "../starfire-audio" }
 starfire-input = { path = "../starfire-input" }
-# dioxus is added when the session UI + render surface land (Phase 1).
+winit = { workspace = true } # window + event loop for the render surface
+# dioxus is added when the session UI lands (Phase 1).
 
 [lints]
 workspace = true

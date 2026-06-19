@@ -477,8 +477,8 @@ impl Decoder for VideoToolboxDecoder {
 
         // Pull whatever finished; VideoToolbox may deliver asynchronously, so a
         // given push may return the previous frame or nothing yet.
-        let mut frames = self.drain_sink()?;
-        Ok(frames.drain(..).next())
+        let frames = self.drain_sink()?;
+        Ok(frames.into_iter().next())
     }
 
     fn flush(&mut self) -> Result<Vec<VideoFrame>, DecodeError> {
