@@ -173,6 +173,13 @@ impl StreamSession {
         self.last_ping = std::time::Instant::now();
     }
 
+    /// Send one encoded input control message (see [`crate::input`]) to the host
+    /// over the ENet control channel (channel 0, reliable). Call immediately per
+    /// input event for lowest latency.
+    pub fn send_input(&mut self, msg: &[u8]) -> crate::Result<()> {
+        self.control.send(0, msg)
+    }
+
     /// Pump the session once and return one received video datagram's length (in
     /// `buf`) if available. Keeps the control peer alive and re-pings periodically.
     /// Call in a tight loop on the network thread.

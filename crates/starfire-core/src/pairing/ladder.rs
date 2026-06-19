@@ -853,6 +853,47 @@ mod tests {
         client.cancel().ok();
     }
 
+    /// Live F10: bring up a session and send a burst of relative mouse moves;
+    /// the host desktop cursor should visibly travel right+down. Validated by
+    /// sampling the Windows cursor position before/after (the host is the oracle).
+    /// Run with `STARFIRE_TEST_HOST=<lan-ip> -- --ignored live_input --nocapture`.
+    #[test]
+    #[ignore = "requires a running Sunshine host; moves the host cursor"]
+    fn live_input() {
+        use crate::input;
+        use crate::launch::LaunchConfig;
+        use crate::rtsp::AnnounceConfig;
+        use crate::session::StreamSession;
+        use std::time::Instant;
+
+        let host = test_host();
+        let client = pair_and_finalize();
+        let apps = client.applist().expect("applist");
+        let desktop = apps.iter().find(|a| a.title == "Desktop").expect("Desktop");
+        let mut sess = StreamSession::start(
+            client,
+            &host,
+            &desktop.id,
+            &LaunchConfig::default(),
+            &AnnounceConfig::default(),
+        )
+        .expect("session start");
+
+        // Let the control channel settle, then stream relative moves while
+        // keeping the media pings alive (poll_video) so the session stays up.
+        std::thread::sleep(Duration::from_millis(400));
+        let mut buf = [0u8; 2048];
+        let start = Instant::now();
+        let mut sent = 0u32;
+        while start.elapsed() < Duration::from_secs(4) {
+            let _ = sess.poll_video(&mut buf); // drives keepalive ping
+            sess.send_input(&input::mouse_move_rel(10, 6)).expect("send input");
+            sent += 1;
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        println!("INPUT: sent {sent} relative mouse moves (cursor should be bottom-right now)");
+    }
+
     /// Focused F6/F7 arming check: pair → launch → full handshake (which now
     /// includes the ANNOUNCE that arms the session) and assert it reaches PLAY.
     /// The complete data plane (control + video) is covered by `live_explore_video`.
