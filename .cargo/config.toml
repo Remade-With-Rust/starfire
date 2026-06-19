@@ -1,0 +1,8 @@
+# Workspace-wide build environment.
+#
+# libopus (vendored by audiopus_sys, built via CMake) declares an old
+# `cmake_minimum_required` that CMake >= 3.30 refuses by default. This override
+# restores the pre-3.30 compatibility policy so libopus builds with modern CMake
+# on every platform. (Building the audio crate also needs `cmake` on PATH.)
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"

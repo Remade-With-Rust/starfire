@@ -6,6 +6,13 @@
 
 use starfire_core::audio::ChannelLayout;
 
+pub mod decode;
+pub mod output;
+pub mod rtp;
+
+pub use decode::OpusAudioDecoder;
+pub use output::CpalPlayer;
+
 #[derive(Debug, thiserror::Error)]
 pub enum AudioError {
     #[error("no audio backend available yet")]

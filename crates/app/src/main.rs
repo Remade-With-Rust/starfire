@@ -26,6 +26,7 @@ use starfire_core::rtsp::AnnounceConfig;
 use starfire_core::session::{self, StreamSession};
 use starfire_core::video::reassembly::Depacketizer;
 use starfire_core::video::Codec;
+use starfire_audio::{CpalPlayer, OpusAudioDecoder};
 use starfire_decode::select::{create_decoder, Accel};
 use starfire_decode::VideoFrame;
 use starfire_render::{Renderer, VideoRenderer};
@@ -196,13 +197,54 @@ fn run_session(latest: Arc<Mutex<Option<VideoFrame>>>, emit: impl Fn(AppEvent)) 
 
     eprintln!("[starfire] streaming — decoding frames …");
     let mut buf = [0u8; 2048];
+    let mut abuf = [0u8; 2048];
     let (mut frames, mut pkts, mut aus, mut errs) = (0u64, 0u64, 0u64, 0u64);
     let mut last_report = std::time::Instant::now();
+
+    // One-shot audio fixture capture (datagrams: u16-LE len prefix + bytes), then
+    // exit — for offline Opus-decoder development. Set STARFIRE_AUDIO_FIXTURE=path.
+    let mut afix: Option<(String, Vec<u8>)> =
+        env("STARFIRE_AUDIO_FIXTURE").map(|p| (p, Vec::new()));
+    let mut apkts = 0u64;
+
+    // Audio runs on its own thread (decoupled — never gates video). Mute with
+    // STARFIRE_AUDIO=off; the session still pings the audio port (keepalive) via
+    // poll_video, so muting doesn't tear the session down.
+    let audio_on = !matches!(
+        env("STARFIRE_AUDIO").as_deref(),
+        Some("off") | Some("0") | Some("false") | Some("no")
+    );
+    let audio_tx = if audio_on && afix.is_none() {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        thread::spawn(move || audio_thread(rx));
+        Some(tx)
+    } else {
+        if !audio_on {
+            eprintln!("[starfire] audio disabled (STARFIRE_AUDIO=off) — video-only, lowest latency");
+        }
+        None
+    };
+
     loop {
         // Periodic pipeline health report (helps diagnose where frames stall).
         if last_report.elapsed() > Duration::from_secs(2) {
-            eprintln!("[starfire] rx_pkts={pkts} aus={aus} decoded={frames} decode_errs={errs}");
+            eprintln!("[starfire] rx_pkts={pkts} apkts={apkts} aus={aus} decoded={frames} decode_errs={errs}");
             last_report = std::time::Instant::now();
+        }
+        // Drain audio every iteration (non-blocking) so it never gates video.
+        while let Some(an) = sess.poll_audio(&mut abuf) {
+            apkts += 1;
+            if let Some((path, data)) = afix.as_mut() {
+                data.extend_from_slice(&(an as u16).to_le_bytes());
+                data.extend_from_slice(&abuf[..an]);
+                if apkts >= 600 {
+                    std::fs::write(path.as_str(), &*data).ok();
+                    eprintln!("[starfire] wrote {} audio bytes to {path}", data.len());
+                    std::process::exit(0);
+                }
+            } else if let Some(tx) = &audio_tx {
+                let _ = tx.send(abuf[..an].to_vec());
+            }
         }
         let Some(n) = sess.poll_video(&mut buf) else {
             continue;
@@ -228,6 +270,47 @@ fn run_session(latest: Arc<Mutex<Option<VideoFrame>>>, emit: impl Fn(AppEvent)) 
                 errs += 1;
                 if errs <= 3 {
                     eprintln!("[starfire] decode error: {e}");
+                }
+            }
+        }
+    }
+}
+
+/// Audio path, fully decoupled from video: own the Opus decoder + the cpal
+/// output device, decode each received audio datagram and feed playback. Runs on
+/// its own thread; `CpalPlayer`/the device stream are `!Send`, so they're created
+/// here rather than passed in.
+fn audio_thread(rx: std::sync::mpsc::Receiver<Vec<u8>>) {
+    let player = match CpalPlayer::new() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[starfire] audio output unavailable: {e}");
+            return;
+        }
+    };
+    let mut dec = match OpusAudioDecoder::new() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[starfire] opus init failed: {e}");
+            return;
+        }
+    };
+    let mut played = 0u64;
+    while let Ok(pkt) = rx.recv() {
+        let Some(payload) = starfire_audio::rtp::opus_payload(&pkt) else {
+            continue; // FEC/keepalive — not an Opus data packet
+        };
+        match dec.decode(payload) {
+            Ok(pcm) => {
+                player.push(&pcm);
+                played += 1;
+                if played <= 2 {
+                    eprintln!("[starfire] audio playing ({} samples/frame)", pcm.len() / 2);
+                }
+            }
+            Err(e) => {
+                if played < 2 {
+                    eprintln!("[starfire] audio decode error: {e}");
                 }
             }
         }

@@ -45,6 +45,9 @@ wgpu = "27"
 winit = "0.30"
 pollster = "0.4"   # block_on for device request + headless readback
 bytemuck = { version = "1", features = ["derive"] } # POD uniform structs
+# audio layer (permissive: libopus is BSD-3, cpal is Apache-2.0). docs/protocol/08.
+audiopus = "=0.3.0-rc.0" # Opus decode (libopus via CMake on all platforms)
+cpal = "0.15"      # cross-platform audio output (CoreAudio / WASAPI)
 
 # Lints that encode the baseline rules from docs/01-overview.md.
 # Warn (not deny) in Phase 0 so stubs stay green; tighten to deny before Phase 1.

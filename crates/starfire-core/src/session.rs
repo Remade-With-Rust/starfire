@@ -138,12 +138,17 @@ impl StreamSession {
 
         let video = UdpSocket::bind("0.0.0.0:0")?;
         let audio = UdpSocket::bind("0.0.0.0:0")?;
+        // Video paces the pump (short blocking read); audio is drained
+        // non-blocking each loop so it never adds latency to the video path.
         video.set_read_timeout(Some(Duration::from_millis(4)))?;
+        audio.set_nonblocking(true)?;
 
         eprintln!(
-            "[stream] video socket {:?} -> host {host}:{} (host streams back to our source port)",
+            "[stream] video socket {:?} (host:{}), audio socket {:?} (host:{})",
             video.local_addr().ok(),
-            rs.ports.video_port
+            rs.ports.video_port,
+            audio.local_addr().ok(),
+            rs.ports.audio_port
         );
         let mut s = Self {
             client,
@@ -191,6 +196,17 @@ impl StreamSession {
                 None
             }
         }
+    }
+
+    /// Drain one audio datagram (non-blocking) into `buf`, returning its length.
+    /// Independent of the video path — audio never gates video. Returns `None`
+    /// when no audio packet is queued. The keepalive ping is driven by
+    /// [`poll_video`], so audio can be fully ignored (muted) without the host
+    /// tearing the session down.
+    ///
+    /// [`poll_video`]: StreamSession::poll_video
+    pub fn poll_audio(&mut self, buf: &mut [u8]) -> Option<usize> {
+        self.audio.recv_from(buf).ok().map(|(n, _)| n)
     }
 }
 

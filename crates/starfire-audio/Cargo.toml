@@ -11,7 +11,8 @@ description = "Audio output behind a trait (cpal); Opus decode + channel layout 
 [dependencies]
 starfire-core = { path = "../starfire-core" }
 thiserror = { workspace = true }
-# opus/audiopus + cpal are added when audio lands (Phase 2, docs/protocol/08).
+audiopus = { workspace = true } # Opus decode (libopus BSD-3, vendored)
+cpal = { workspace = true }     # audio output (CoreAudio / WASAPI)
 
 [lints]
 workspace = true
