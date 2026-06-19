@@ -65,8 +65,9 @@ impl SdpInfo {
 pub struct RtspSession {
     pub session_id: String,
     pub ports: StreamSetup,
-    /// `X-SS-Ping-Payload` (decoded) — the bytes the client sends to each media
-    /// UDP port to open the return path.
+    /// `X-SS-Ping-Payload` — the **literal** header string (NOT hex-decoded; the
+    /// client sends these exact bytes + a 4-byte BE counter to each media UDP
+    /// port to open the return path). Confirmed from a Moonlight capture.
     pub ping_payload: Vec<u8>,
     /// `X-SS-Connect-Data` — the ENet control-channel connect token.
     pub control_connect_data: u32,
@@ -206,7 +207,8 @@ impl RtspClient {
                 session_id = s.split(';').next().unwrap_or(s).trim().to_string();
             }
             if let Some(p) = resp.header("X-SS-Ping-Payload") {
-                ping_payload = crate::hex::decode(p).unwrap_or_default();
+                // Sent literally (the ASCII header string), not hex-decoded.
+                ping_payload = p.as_bytes().to_vec();
             }
             if let Some(c) = resp.header("X-SS-Connect-Data") {
                 control_connect_data = c.trim().parse().unwrap_or(0);

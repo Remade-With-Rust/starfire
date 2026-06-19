@@ -689,37 +689,40 @@ mod tests {
             rs.ports.video_port, rs.ports.audio_port, rs.ports.control_port, rs.ping_payload
         );
 
-        // Bind the advertised client port and read whatever the host streams back.
-        let video = UdpSocket::bind("0.0.0.0:50000")
-            .or_else(|_| UdpSocket::bind("0.0.0.0:0"))
-            .expect("bind video");
+        // Ephemeral socket per stream (matches Moonlight). The ping is the literal
+        // X-SS-Ping-Payload string + a 4-byte big-endian counter.
+        let video = UdpSocket::bind("0.0.0.0:0").expect("bind video");
         video
-            .set_read_timeout(Some(Duration::from_millis(200)))
+            .set_read_timeout(Some(Duration::from_millis(100)))
             .unwrap();
-        println!(
-            "video socket local port {}",
-            video.local_addr().unwrap().port()
-        );
+        let video_server = format!("{host}:{}", rs.ports.video_port);
 
         let mut buf = [0u8; 2048];
-        let mut got = 0usize;
+        let (mut got, mut seq, mut hevc) = (0usize, 0u32, false);
+        let mut last_ping = Instant::now() - Duration::from_secs(1);
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(6) {
-            // Keep pinging the media ports to open/maintain the return path.
-            let _ = video.send_to(&rs.ping_payload, format!("{host}:{}", rs.ports.video_port));
-            let _ = video.send_to(&rs.ping_payload, format!("{host}:{}", rs.ports.audio_port));
-            match video.recv_from(&mut buf) {
-                Ok((n, from)) => {
-                    got += 1;
-                    if got <= 8 {
-                        println!("RTP from {from}: {n} bytes head={:02x?}", &buf[..n.min(32)]);
-                    }
+            if last_ping.elapsed() > Duration::from_millis(200) {
+                seq += 1;
+                let mut p = rs.ping_payload.clone();
+                p.extend_from_slice(&seq.to_be_bytes());
+                let _ = video.send_to(&p, &video_server);
+                last_ping = Instant::now();
+            }
+            if let Ok((n, _)) = video.recv_from(&mut buf) {
+                got += 1;
+                if got <= 5 {
+                    println!("RTP {n}B head={:02x?}", &buf[..n.min(40)]);
                 }
-                Err(_) => std::thread::sleep(Duration::from_millis(50)),
+                // HEVC VPS NAL header (0x40 0x01) appears in plaintext payload.
+                if buf[..n].windows(2).any(|w| w == [0x40, 0x01]) {
+                    hevc = true;
+                }
             }
         }
-        println!("received {got} media packet(s)");
+        println!("received {got} video packet(s); hevc_seen={hevc}");
         client.cancel().ok();
+        assert!(got > 0, "expected video RTP from the host");
     }
 
     /// F6 exploration: pair → launch → RTSP handshake → ENet connect to the
