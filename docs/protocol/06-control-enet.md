@@ -28,6 +28,31 @@ UDP ports) for a **same-machine client**. Observed:
 (the standard GameStream topology); same-host streaming is a known-hard setup.
 Until then F6/F7/F8 transport code lands as scaffolding, not live-validated.
 
+### Update — cross-machine attempt (real Mac client → Windows host)
+Ran the client from a **real second machine** (Apple-Silicon Mac, macOS 14.6) over
+the LAN against the Windows Sunshine. Results:
+- ✅ **Control plane works cross-machine + on macOS**: discover→pair→serverinfo→
+  applist→launch→RTSP all succeed from the Mac (the client core builds + runs on
+  arm64 macOS — validates that target). Test infra is `STARFIRE_TEST_HOST`-aware.
+- ✅ Sunshine **creates the encoder** for the Mac session (`Creating encoder
+  [hevc_qsv]`) — the host is willing to stream.
+- ⛔ **Data plane still doesn't connect.** ENet connect to 47999 **times out**
+  (vs same-machine's ICMP-unreachable). Enabling ENet's **CRC32 checksum** (the
+  Moonlight customization, `rusty_enet::crc32`) did not fix it.
+- 🔑 **Key finding:** `netstat -an` on the host shows Sunshine **does not bind
+  47998/47999/48000 as UDP listeners** at all, even with the encoder running. So
+  the RTSP `SETUP` `server_port` values are **not** plain UDP listen ports — the
+  real port/socket model is unknown and **must be read from a capture**.
+
+### Conclusion — need a ground-truth capture
+Guessing the UDP choreography has hit diminishing returns. Per the bit-exact
+methodology, the next step is to **capture a working Moonlight↔Sunshine session**
+(lawful: observing wire behavior, not reading Moonlight source) and read the exact
+data-plane flow: which ports are actually used, the ENet handshake/CRC, the ping
+sequence, and the RTP framing. Then implement F6/F7/F8 to match. Until that
+capture exists, the ENet transport (`ControlChannel`, now with CRC32) is committed
+as scaffolding, not live-validated.
+
 ### What's confirmed (from RTSP SETUP, F5)
 - Control port = 47999; **`X-SS-Connect-Data`** (u32) is the ENet connect data.
 - **`X-SS-Ping-Payload`** (8 bytes) is sent to the video/audio UDP ports from the

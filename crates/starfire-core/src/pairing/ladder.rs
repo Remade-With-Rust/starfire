@@ -257,6 +257,7 @@ mod tests {
     /// until a PIN is entered, so the live test fires this on a background thread.
     fn submit_pin_via_curl(pin: &str) {
         let body = format!("{{\"pin\":\"{pin}\",\"name\":\"starfire-test\"}}");
+        let url = web_url("/api/pin");
         let _ = std::process::Command::new("curl")
             .args([
                 "-sk",
@@ -266,7 +267,7 @@ mod tests {
                 "starfire:starfire-test-1",
                 "-X",
                 "POST",
-                "https://localhost:47990/api/pin",
+                &url,
                 "-H",
                 "Content-Type: application/json",
                 "-d",
@@ -320,6 +321,16 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
+    /// Sunshine web-API URL on the stream host (same host as `test_host`).
+    fn web_url(path: &str) -> String {
+        format!("https://{}:47990{path}", test_host())
+    }
+
+    /// Reset the host's trusted-clients list (idempotent test setup).
+    fn unpair_all() {
+        curl(&["-X", "POST", web_url("/api/clients/unpair-all").as_str()]);
+    }
+
     /// Live full pairing (phases 1–4), verified via Sunshine's trusted-clients
     /// API (over plain HTTP the host can't identify us, so `PairStatus` is always
     /// 0 — the clients list is the real signal). Resets pairing state first so it
@@ -328,11 +339,7 @@ mod tests {
     #[ignore = "requires a running Sunshine host + web API on 47989/47990"]
     fn live_pair_full() {
         // Clean slate so accumulated pending pairings don't block getservercert.
-        curl(&[
-            "-X",
-            "POST",
-            "https://localhost:47990/api/clients/unpair-all",
-        ]);
+        unpair_all();
 
         let pin = "1234";
         let device = "starfire-test";
@@ -355,7 +362,7 @@ mod tests {
         );
 
         // The host must now list us as a trusted client.
-        let clients = curl(&["https://localhost:47990/api/clients/list"]);
+        let clients = curl(&[web_url("/api/clients/list").as_str()]);
         println!("clients/list = {clients}");
         assert!(
             clients.contains(device),
@@ -373,11 +380,7 @@ mod tests {
         use crate::https::HttpsClient;
         use crate::serverinfo::ServerInfo;
 
-        curl(&[
-            "-X",
-            "POST",
-            "https://localhost:47990/api/clients/unpair-all",
-        ]);
+        unpair_all();
 
         let pin = "1234";
         let id = ClientIdentity::generate("starfire-test").unwrap();
@@ -426,11 +429,7 @@ mod tests {
     fn live_explore_applist_launch() {
         use crate::https::{cert_pem_to_der, HttpsClient};
 
-        curl(&[
-            "-X",
-            "POST",
-            "https://localhost:47990/api/clients/unpair-all",
-        ]);
+        unpair_all();
         let pin = "1234";
         let id = ClientIdentity::generate("starfire-test").unwrap();
         let cert = id.cert_pem.clone();
@@ -502,11 +501,7 @@ mod tests {
         use crate::https::{cert_pem_to_der, HttpsClient};
         use crate::launch::{LaunchConfig, PairedClient};
 
-        curl(&[
-            "-X",
-            "POST",
-            "https://localhost:47990/api/clients/unpair-all",
-        ]);
+        unpair_all();
         let pin = "1234";
         let id = ClientIdentity::generate("starfire-test").unwrap();
         let cert = id.cert_pem.clone();
@@ -559,11 +554,7 @@ mod tests {
         use crate::launch::PairedClient;
 
         let host = test_host();
-        curl(&[
-            "-X",
-            "POST",
-            "https://localhost:47990/api/clients/unpair-all",
-        ]);
+        unpair_all();
         let pin = "1234";
         let id = ClientIdentity::generate("starfire-test").unwrap();
         let cert = id.cert_pem.clone();
@@ -669,6 +660,65 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(500));
         }
+        client.cancel().ok();
+    }
+
+    /// F7/data-plane exploration: pair → launch → RTSP handshake → bind the
+    /// advertised client port, ping the video/audio ports, and see if RTP flows
+    /// (which is what fully activates the host's encoder + control port).
+    /// Run with `STARFIRE_TEST_HOST=<lan-ip> -- --ignored live_explore_video --nocapture`.
+    #[test]
+    #[ignore = "requires a running Sunshine host reachable by LAN IP"]
+    fn live_explore_video() {
+        use crate::launch::LaunchConfig;
+        use crate::rtsp::RtspClient;
+        use std::net::UdpSocket;
+        use std::time::Instant;
+
+        let host = test_host();
+        let client = pair_and_finalize();
+        let apps = client.applist().expect("applist");
+        let desktop = apps.iter().find(|a| a.title == "Desktop").expect("Desktop");
+        let session = client
+            .launch(&desktop.id, &LaunchConfig::default())
+            .expect("launch");
+        let mut rtsp = RtspClient::new(&session.rtsp_url, Duration::from_secs(10)).expect("client");
+        let rs = rtsp.handshake().expect("handshake");
+        println!(
+            "host={host} video={} audio={} control={} ping={:02x?}",
+            rs.ports.video_port, rs.ports.audio_port, rs.ports.control_port, rs.ping_payload
+        );
+
+        // Bind the advertised client port and read whatever the host streams back.
+        let video = UdpSocket::bind("0.0.0.0:50000")
+            .or_else(|_| UdpSocket::bind("0.0.0.0:0"))
+            .expect("bind video");
+        video
+            .set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        println!(
+            "video socket local port {}",
+            video.local_addr().unwrap().port()
+        );
+
+        let mut buf = [0u8; 2048];
+        let mut got = 0usize;
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(6) {
+            // Keep pinging the media ports to open/maintain the return path.
+            let _ = video.send_to(&rs.ping_payload, format!("{host}:{}", rs.ports.video_port));
+            let _ = video.send_to(&rs.ping_payload, format!("{host}:{}", rs.ports.audio_port));
+            match video.recv_from(&mut buf) {
+                Ok((n, from)) => {
+                    got += 1;
+                    if got <= 8 {
+                        println!("RTP from {from}: {n} bytes head={:02x?}", &buf[..n.min(32)]);
+                    }
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(50)),
+            }
+        }
+        println!("received {got} media packet(s)");
         client.cancel().ok();
     }
 
