@@ -68,16 +68,18 @@ pub fn parse(bytes: &[u8]) -> Result<PcapFile, PcapError> {
     let mut records = Vec::new();
     let mut pos = 24;
     while pos < bytes.len() {
+        // A truncated trailing record is normal for a still-being-written live
+        // capture — keep every complete record and stop, rather than erroring.
         if pos + 16 > bytes.len() {
-            return Err(PcapError::Truncated { offset: pos });
+            break;
         }
         let incl_len = rd_u32(bytes, pos + 8) as usize;
         let start = pos + 16;
-        let end = start
-            .checked_add(incl_len)
-            .ok_or(PcapError::Truncated { offset: pos })?;
+        let Some(end) = start.checked_add(incl_len) else {
+            break;
+        };
         if end > bytes.len() {
-            return Err(PcapError::Truncated { offset: start });
+            break;
         }
         records.push(Record {
             data: bytes[start..end].to_vec(),
@@ -132,14 +134,18 @@ mod tests {
     }
 
     #[test]
-    fn rejects_truncated_body() {
+    fn tolerates_truncated_trailing_record() {
         let mut f = global_header_le(1);
-        // Claim a 10-byte record but provide only 2.
+        f.extend(record_le(b"abc")); // one complete record
+                                     // Then a truncated record: claims 10 bytes, provides 2.
         f.extend_from_slice(&0u32.to_le_bytes());
         f.extend_from_slice(&0u32.to_le_bytes());
         f.extend_from_slice(&10u32.to_le_bytes());
         f.extend_from_slice(&10u32.to_le_bytes());
         f.extend_from_slice(b"xy");
-        assert!(matches!(parse(&f), Err(PcapError::Truncated { .. })));
+        // The complete record is kept; the truncated tail is dropped (no error).
+        let parsed = parse(&f).unwrap();
+        assert_eq!(parsed.records.len(), 1);
+        assert_eq!(parsed.records[0].data, b"abc");
     }
 }

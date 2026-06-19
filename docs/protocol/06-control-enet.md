@@ -44,14 +44,33 @@ the LAN against the Windows Sunshine. Results:
   the RTSP `SETUP` `server_port` values are **not** plain UDP listen ports — the
   real port/socket model is unknown and **must be read from a capture**.
 
-### Conclusion — need a ground-truth capture
-Guessing the UDP choreography has hit diminishing returns. Per the bit-exact
-methodology, the next step is to **capture a working Moonlight↔Sunshine session**
-(lawful: observing wire behavior, not reading Moonlight source) and read the exact
-data-plane flow: which ports are actually used, the ENet handshake/CRC, the ping
-sequence, and the RTP framing. Then implement F6/F7/F8 to match. Until that
-capture exists, the ENet transport (`ControlChannel`, now with CRC32) is committed
-as scaffolding, not live-validated.
+### ✅ Captured a working Moonlight↔Sunshine session (2026-06-18)
+Ran Moonlight on the Mac → streamed the Windows Sunshine (720p HEVC, decoded fine
+via VideoToolbox) and captured it with `tcpdump`, then sliced it with our own
+`fixture-slicer` (which **validated the Phase-0 tool on real data**). Capture +
+slices live under `.sunshine/` (gitignored). The ground-truth data-plane map:
+
+| Layer | Flow | Detail |
+|-------|------|--------|
+| RTSP | client → :48010, **7 separate TCP connections** | confirms one-request-per-connection; one client request is **1684 B and binary** (encrypted config/ANNOUNCE — `encryptionRequested:1`) |
+| Control | client `:50319` → `:47999`, 79 ENet datagrams | **ENet CONNECT = 52 B** (4 hdr + **4 CRC32** + 44 cmd) → server **VERIFY_CONNECT = 48 B**. Confirms ENet **with CRC32**. |
+| Video | client `:50683` → `:47998`, 496 datagrams, ~694 KB | RTP/HEVC |
+| Audio | client `:56488` → `:48000`, 263 datagrams | RTP/Opus |
+
+### Corrected data-plane model (the thing I had wrong)
+- The client binds a **separate ephemeral UDP port per stream** (video/audio/control
+  each get their own). It is **not** a fixed `50000`/`X-GS-ClientPort`.
+- Sunshine **does not bind 47998/48000 as listeners** — it **sends from** them to
+  the client's ephemeral port (which is why host `netstat` showed nothing). Control
+  (47999) is genuinely bidirectional ENet.
+- The RTSP **ANNOUNCE/encrypted config is present** in Moonlight's flow — Starfire
+  skips it, which is the likely reason the host never arms the data plane for us.
+
+### Next phase — implement F6/F7 against the capture
+With the capture in hand the work is well-defined: (1) send the RTSP
+ANNOUNCE/config; (2) confirm rusty_enet emits the 52-B CRC32 CONNECT and completes;
+(3) decrypt control via the GCM-tag-verify oracle; (4) depacketize the RTP video.
+The `ControlChannel` (ENet + CRC32) is committed as scaffolding pending this.
 
 ### What's confirmed (from RTSP SETUP, F5)
 - Control port = 47999; **`X-SS-Connect-Data`** (u32) is the ENet connect data.
