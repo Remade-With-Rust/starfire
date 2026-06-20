@@ -11,7 +11,7 @@ description = "Clean-room Rust protocol core for the Sunshine GameStream wire pr
 [features]
 # Exposes wire::assert_roundtrip to other crates' tests (it's always on under
 # `cfg(test)` within this crate). Declared so cfg checks are recognized.
-test-helpers = []
+test-helpers = ["starfire-protocol/test-helpers"]
 
 [dependencies]
 starfire-protocol = { path = "../starfire-protocol" } # shared wire layer (also used by Comet)

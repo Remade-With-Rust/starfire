@@ -15,6 +15,11 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Expose wire::assert_roundtrip to downstream test suites (always on under this
+# crate's own cfg(test)). starfire-core forwards its `test-helpers` to this.
+test-helpers = []
+
 [dependencies]
 thiserror = { workspace = true }
 quick-xml = { workspace = true } # flat GameStream XML envelopes (xml::parse_flat)

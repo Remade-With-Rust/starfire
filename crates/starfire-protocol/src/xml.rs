@@ -67,8 +67,9 @@ pub fn parse_flat(xml: &[u8]) -> crate::Result<Flat> {
     Ok(out)
 }
 
-/// Strip any `ns:` prefix from an element name.
-pub(crate) fn local_name(name: &[u8]) -> String {
+/// Strip any `ns:` prefix from an element name (used across the crate boundary
+/// by `starfire-core`'s `/applist` record parser, so it is `pub`).
+pub fn local_name(name: &[u8]) -> String {
     let s = String::from_utf8_lossy(name);
     s.rsplit(':').next().unwrap_or(&s).to_string()
 }
