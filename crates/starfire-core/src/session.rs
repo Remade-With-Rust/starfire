@@ -185,6 +185,29 @@ impl StreamSession {
         self.control.send(0, msg)
     }
 
+    /// Ask the host for an IDR keyframe — Sunshine `REQUEST_IDR_FRAME` (0x0302),
+    /// `control_header_v2` framing (type LE u16 + len LE u16 + payload). Sent on
+    /// unrecoverable video loss so the host re-keys immediately instead of waiting
+    /// out the GOP. Backwards-compatible: Sunshine handles this type; a host that
+    /// doesn't simply ignores it.
+    pub fn request_idr(&mut self) -> crate::Result<()> {
+        self.control.send(0, &[0x02, 0x03, 0x00, 0x00]) // type=0x0302, len=0
+    }
+
+    /// Send a periodic loss report — Sunshine `LOSS_STATS` (0x0201) with the
+    /// `int32[4]{count, time_ms, reserved, lastGoodFrame}` payload. Feeds the
+    /// host's bitrate estimator (a host that ignores it is unaffected).
+    pub fn send_loss_stats(&mut self, count: i32, time_ms: i32, last_good: i32) -> crate::Result<()> {
+        let mut m = Vec::with_capacity(20);
+        m.extend_from_slice(&0x0201u16.to_le_bytes());
+        m.extend_from_slice(&16u16.to_le_bytes());
+        m.extend_from_slice(&count.to_le_bytes());
+        m.extend_from_slice(&time_ms.to_le_bytes());
+        m.extend_from_slice(&0i32.to_le_bytes()); // reserved
+        m.extend_from_slice(&last_good.to_le_bytes());
+        self.control.send(0, &m)
+    }
+
     /// Pump the session once and return one received video datagram's length (in
     /// `buf`) if available. Keeps the control peer alive and re-pings periodically.
     /// Call in a tight loop on the network thread.

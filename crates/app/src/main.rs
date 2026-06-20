@@ -385,6 +385,15 @@ fn run_session(
     let mut abuf = [0u8; 2048];
     let (mut frames, mut pkts, mut aus, mut errs) = (0u64, 0u64, 0u64, 0u64);
     let mut last_report = std::time::Instant::now();
+    // Loss feedback to the host (Sunshine-compatible): a gap in delivered frame
+    // indices means a frame was lost beyond FEC recovery, so request an IDR
+    // (cooldown-limited) and accumulate the loss for the periodic LOSS_STATS the
+    // host's bitrate estimator consumes.
+    let mut last_decoded_idx: Option<u32> = None;
+    let mut loss_window = 0i32;
+    let mut consec_errs = 0u32;
+    let mut last_idr_req = std::time::Instant::now() - Duration::from_secs(2);
+    let mut last_loss_report = std::time::Instant::now();
 
     // Benchmark mode: measure for STARFIRE_BENCH_SECS (default 20), print a
     // report, and exit. Run headless for clean numbers.
@@ -437,6 +446,13 @@ fn run_session(
             eprintln!("[starfire] rx_pkts={pkts} apkts={apkts} aus={aus} decoded={frames} decode_errs={errs}");
             last_report = std::time::Instant::now();
         }
+        // Periodic LOSS_STATS to the host (drives its bitrate estimator).
+        if last_loss_report.elapsed() > Duration::from_millis(500) {
+            let dt = last_loss_report.elapsed().as_millis() as i32;
+            let _ = sess.send_loss_stats(loss_window, dt, last_decoded_idx.unwrap_or(0) as i32);
+            loss_window = 0;
+            last_loss_report = std::time::Instant::now();
+        }
         // Drain audio every iteration (non-blocking) so it never gates video.
         while let Some(an) = sess.poll_audio(&mut abuf) {
             apkts += 1;
@@ -475,6 +491,17 @@ fn run_session(
         match decoded {
             Ok(Some(frame)) => {
                 frames += 1;
+                consec_errs = 0;
+                // Loss for the host's BWE = gaps between *decoded* frames. This
+                // captures both transit loss AND decode-failure cascades (frames
+                // that arrived but couldn't decode), which is the user-visible
+                // damage — so the estimator backs off a rate that's overshooting.
+                if let Some(last) = last_decoded_idx {
+                    if frame_idx > last + 1 {
+                        loss_window += (frame_idx - last - 1) as i32;
+                    }
+                }
+                last_decoded_idx = Some(frame_idx);
                 if let Some(b) = bench.as_mut() {
                     b.frame(decode_us, host_lat, rtt_ms, frame_idx, frame.width, frame.height);
                 }
@@ -489,8 +516,19 @@ fn run_session(
             Ok(None) => {}
             Err(e) => {
                 errs += 1;
+                consec_errs += 1;
                 if errs <= 3 {
                     eprintln!("[starfire] decode error: {e}");
+                }
+                // Only ask for an IDR when the decoder is genuinely STUCK — a run
+                // of consecutive failures (reference chain broken, no param sets) —
+                // and at most once a second. A single failure usually self-heals at
+                // the next FEC-recovered frame or the periodic IDR, so re-keying for
+                // it just adds a losable keyframe burst.
+                if consec_errs >= 5 && last_idr_req.elapsed() > Duration::from_secs(1) {
+                    let _ = sess.request_idr();
+                    last_idr_req = std::time::Instant::now();
+                    consec_errs = 0;
                 }
             }
         }
