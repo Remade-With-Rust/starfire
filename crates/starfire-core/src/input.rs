@@ -92,14 +92,18 @@ pub fn scroll_horizontal(amount: i16) -> Vec<u8> {
 }
 
 /// Keyboard key down/up. `vk` is a Windows virtual-key code; `modifiers` is the
-/// VK modifier bitmask (shift/ctrl/alt/meta). NV_KEYBOARD_PACKET order:
-/// `flags(u8), keyCode(u16), modifiers(u8), zero2(u16)`.
+/// VK modifier bitmask (shift/ctrl/alt/meta).
+///
+/// `NV_KEYBOARD_PACKET` is `{ char flags; short keyCode; char modifiers; short
+/// zero2; }`, and `Input.h` wraps everything in `#pragma pack(push, 1)` — so the
+/// fields are **packed** (no alignment padding). `keyCode` is little-endian (the
+/// host reads it un-swapped, VK in the low byte). [SOURCE: Input.h pack(1)]
 pub fn key(vk: u16, modifiers: u8, down: bool) -> Vec<u8> {
     let magic = if down { MAGIC_KEY_DOWN } else { MAGIC_KEY_UP };
     let mut body = Vec::with_capacity(6);
     body.push(0u8); // flags
-    body.extend_from_slice(&vk.to_le_bytes()); // keyCode (VK in low byte)
-    body.push(modifiers);
+    body.extend_from_slice(&vk.to_le_bytes()); // keyCode (LE)
+    body.push(modifiers); // modifiers
     body.extend_from_slice(&0u16.to_le_bytes()); // zero2
     frame(magic, &body)
 }
@@ -133,12 +137,20 @@ mod tests {
     }
 
     #[test]
-    fn key_down_is_vk_in_low_byte() {
-        // 'A' = VK 0x41, no modifiers.
+    fn key_down_packed_layout() {
+        // 'A' = VK 0x41. Packed (pragma pack 1): flags|keyCode(LE)|mods|zero2.
         let msg = key(0x41, 0, true);
-        assert_eq!(msg[0..2], [0x06, 0x02]); // input control type
-        assert_eq!(msg[6..10], [0x03, 0, 0, 0]); // magic KEY_DOWN (LE)
-        assert_eq!(msg[10], 0); // flags
-        assert_eq!(msg[11..13], [0x41, 0x00]); // keyCode 0x41 (LE)
+        assert_eq!(
+            msg,
+            vec![
+                0x06, 0x02, // input control type (LE)
+                0x00, 0x00, 0x00, 0x0A, // size = magic(4)+body(6) (BE)
+                0x03, 0x00, 0x00, 0x00, // magic KEY_DOWN (LE)
+                0x00, // flags
+                0x41, 0x00, // keyCode 0x41 (LE)
+                0x00, // modifiers
+                0x00, 0x00, // zero2
+            ]
+        );
     }
 }

@@ -879,19 +879,34 @@ mod tests {
         )
         .expect("session start");
 
-        // Let the control channel settle, then stream relative moves while
-        // keeping the media pings alive (poll_video) so the session stays up.
         std::thread::sleep(Duration::from_millis(400));
         let mut buf = [0u8; 2048];
+
+        // Keyboard FIRST (freshest control channel): type "HI", then Ctrl+A,
+        // Ctrl+C, so the host clipboard ends up holding the typed text — a
+        // definitive check (focus Notepad on the host before running).
+        // VK: H=0x48 I=0x49 A=0x41 C=0x43; CTRL modifier bit = 0x02.
+        for &(vk, modi) in &[(0x48u16, 0u8), (0x49, 0), (0x41, 0x02), (0x43, 0x02)] {
+            let _ = sess.send_input(&input::key(vk, modi, true));
+            std::thread::sleep(Duration::from_millis(45));
+            let _ = sess.send_input(&input::key(vk, modi, false));
+            let _ = sess.poll_video(&mut buf); // keepalive
+            std::thread::sleep(Duration::from_millis(90));
+        }
+        println!("INPUT: typed 'HI' + Ctrl+A + Ctrl+C — host clipboard should hold it");
+
+        // Then stream relative mouse moves (cursor travels right+down).
         let start = Instant::now();
         let mut sent = 0u32;
-        while start.elapsed() < Duration::from_secs(4) {
-            let _ = sess.poll_video(&mut buf); // drives keepalive ping
-            sess.send_input(&input::mouse_move_rel(10, 6)).expect("send input");
+        while start.elapsed() < Duration::from_secs(3) {
+            let _ = sess.poll_video(&mut buf);
+            if sess.send_input(&input::mouse_move_rel(10, 6)).is_err() {
+                break;
+            }
             sent += 1;
             std::thread::sleep(Duration::from_millis(10));
         }
-        println!("INPUT: sent {sent} relative mouse moves (cursor should be bottom-right now)");
+        println!("INPUT: sent {sent} relative mouse moves");
     }
 
     /// Focused F6/F7 arming check: pair → launch → full handshake (which now

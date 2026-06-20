@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use starfire_core::input::{self, MouseButton as SfButton};
 use starfire_core::launch::LaunchConfig;
 use starfire_core::rtsp::AnnounceConfig;
 use starfire_core::session::{self, StreamSession};
@@ -30,10 +31,12 @@ use starfire_audio::{CpalPlayer, OpusAudioDecoder};
 use starfire_decode::select::{create_decoder, Accel};
 use starfire_decode::VideoFrame;
 use starfire_render::{Renderer, VideoRenderer};
+use std::sync::mpsc::Sender;
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::window::{Window, WindowId};
+use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::window::{CursorGrabMode, Window, WindowId};
 
 /// Wake-ups sent from the network/decode thread to the render loop.
 enum AppEvent {
@@ -138,7 +141,11 @@ fn submit_pin(host: &str, pin: &str) {
 /// thread can own the winit event loop. Decoded frames land in `latest`; each
 /// event (new frame / teardown) is delivered via `emit` — the windowed path
 /// forwards it to the event loop, the headless path just logs.
-fn run_session(latest: Arc<Mutex<Option<VideoFrame>>>, emit: impl Fn(AppEvent)) {
+fn run_session(
+    latest: Arc<Mutex<Option<VideoFrame>>>,
+    emit: impl Fn(AppEvent),
+    input_rx: std::sync::mpsc::Receiver<Vec<u8>>,
+) {
     macro_rules! stop {
         ($($arg:tt)*) => {{
             emit(AppEvent::Stopped(format!($($arg)*)));
@@ -226,6 +233,10 @@ fn run_session(latest: Arc<Mutex<Option<VideoFrame>>>, emit: impl Fn(AppEvent)) 
     };
 
     loop {
+        // Send any captured input immediately (drained first for lowest latency).
+        while let Ok(msg) = input_rx.try_recv() {
+            let _ = sess.send_input(&msg);
+        }
         // Periodic pipeline health report (helps diagnose where frames stall).
         if last_report.elapsed() > Duration::from_secs(2) {
             eprintln!("[starfire] rx_pkts={pkts} apkts={apkts} aus={aus} decoded={frames} decode_errs={errs}");
@@ -321,6 +332,54 @@ struct App {
     latest: Arc<Mutex<Option<VideoFrame>>>,
     window: Option<Arc<Window>>,
     renderer: Option<VideoRenderer>,
+    /// Encoded input messages -> network thread -> control channel.
+    input_tx: Sender<Vec<u8>>,
+    /// Pointer captured (FPS mode): raw mouse motion sent as relative deltas.
+    grabbed: bool,
+    /// Live keyboard modifier mask (GameStream bits).
+    modifiers: u8,
+}
+
+impl App {
+    /// Capture the pointer for FPS: lock + hide the cursor so OS mouse motion is
+    /// delivered as raw relative deltas (no acceleration, no edge clamp). Click
+    /// the window to capture; Esc releases.
+    fn grab(&mut self) {
+        if let Some(w) = &self.window {
+            let _ = w
+                .set_cursor_grab(CursorGrabMode::Locked)
+                .or_else(|_| w.set_cursor_grab(CursorGrabMode::Confined));
+            w.set_cursor_visible(false);
+            self.grabbed = true;
+        }
+    }
+
+    fn ungrab(&mut self) {
+        if let Some(w) = &self.window {
+            let _ = w.set_cursor_grab(CursorGrabMode::None);
+            w.set_cursor_visible(true);
+        }
+        self.grabbed = false;
+    }
+
+    fn send(&self, msg: Vec<u8>) {
+        let _ = self.input_tx.send(msg);
+    }
+
+    fn track_modifier(&mut self, vk: u16, down: bool) {
+        let bit: u8 = match vk {
+            0x10 => 0x01,        // shift
+            0x11 => 0x02,        // ctrl
+            0x12 => 0x04,        // alt
+            0x5B | 0x5C => 0x08, // meta / super
+            _ => return,
+        };
+        if down {
+            self.modifiers |= bit;
+        } else {
+            self.modifiers &= !bit;
+        }
+    }
 }
 
 impl ApplicationHandler<AppEvent> for App {
@@ -380,9 +439,101 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                 }
             }
+            WindowEvent::Focused(false) => self.ungrab(),
+            WindowEvent::MouseInput { state, button, .. } => {
+                if !self.grabbed {
+                    // First click captures the pointer; the click isn't forwarded.
+                    if state == ElementState::Pressed {
+                        self.grab();
+                    }
+                    return;
+                }
+                if let Some(b) = map_button(button) {
+                    self.send(input::mouse_button(b, state == ElementState::Pressed));
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let (dx, dy) = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => (x * 120.0, y * 120.0),
+                    MouseScrollDelta::PixelDelta(p) => (p.x as f32, p.y as f32),
+                };
+                if dy != 0.0 {
+                    self.send(input::scroll_vertical(dy as i16));
+                }
+                if dx != 0.0 {
+                    self.send(input::scroll_horizontal(dx as i16));
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                if let PhysicalKey::Code(code) = event.physical_key {
+                    if code == KeyCode::Escape && self.grabbed {
+                        self.ungrab(); // Esc releases the pointer
+                        return;
+                    }
+                    if let Some(vk) = vk_from_keycode(code) {
+                        let down = event.state == ElementState::Pressed;
+                        self.track_modifier(vk, down);
+                        self.send(input::key(vk, self.modifiers, down));
+                    }
+                }
+            }
             _ => {}
         }
     }
+
+    fn device_event(&mut self, _el: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
+        // Raw relative motion — the FPS aim path. Only when the pointer is grabbed.
+        if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
+            if self.grabbed && (dx != 0.0 || dy != 0.0) {
+                self.send(input::mouse_move_rel(dx as i16, dy as i16));
+            }
+        }
+    }
+}
+
+/// Map a winit mouse button to the GameStream button id.
+fn map_button(b: MouseButton) -> Option<SfButton> {
+    Some(match b {
+        MouseButton::Left => SfButton::Left,
+        MouseButton::Right => SfButton::Right,
+        MouseButton::Middle => SfButton::Middle,
+        MouseButton::Back => SfButton::Side1,
+        MouseButton::Forward => SfButton::Side2,
+        _ => return None,
+    })
+}
+
+/// Map a winit physical key to a Windows virtual-key code (what the host expects).
+fn vk_from_keycode(code: KeyCode) -> Option<u16> {
+    use KeyCode as K;
+    Some(match code {
+        K::KeyA => 0x41, K::KeyB => 0x42, K::KeyC => 0x43, K::KeyD => 0x44,
+        K::KeyE => 0x45, K::KeyF => 0x46, K::KeyG => 0x47, K::KeyH => 0x48,
+        K::KeyI => 0x49, K::KeyJ => 0x4A, K::KeyK => 0x4B, K::KeyL => 0x4C,
+        K::KeyM => 0x4D, K::KeyN => 0x4E, K::KeyO => 0x4F, K::KeyP => 0x50,
+        K::KeyQ => 0x51, K::KeyR => 0x52, K::KeyS => 0x53, K::KeyT => 0x54,
+        K::KeyU => 0x55, K::KeyV => 0x56, K::KeyW => 0x57, K::KeyX => 0x58,
+        K::KeyY => 0x59, K::KeyZ => 0x5A,
+        K::Digit0 => 0x30, K::Digit1 => 0x31, K::Digit2 => 0x32, K::Digit3 => 0x33,
+        K::Digit4 => 0x34, K::Digit5 => 0x35, K::Digit6 => 0x36, K::Digit7 => 0x37,
+        K::Digit8 => 0x38, K::Digit9 => 0x39,
+        K::F1 => 0x70, K::F2 => 0x71, K::F3 => 0x72, K::F4 => 0x73,
+        K::F5 => 0x74, K::F6 => 0x75, K::F7 => 0x76, K::F8 => 0x77,
+        K::F9 => 0x78, K::F10 => 0x79, K::F11 => 0x7A, K::F12 => 0x7B,
+        K::Escape => 0x1B, K::Space => 0x20, K::Enter => 0x0D, K::Backspace => 0x08,
+        K::Tab => 0x09, K::CapsLock => 0x14,
+        K::ShiftLeft | K::ShiftRight => 0x10,
+        K::ControlLeft | K::ControlRight => 0x11,
+        K::AltLeft | K::AltRight => 0x12,
+        K::SuperLeft => 0x5B, K::SuperRight => 0x5C,
+        K::ArrowLeft => 0x25, K::ArrowUp => 0x26, K::ArrowRight => 0x27, K::ArrowDown => 0x28,
+        K::Home => 0x24, K::End => 0x23, K::PageUp => 0x21, K::PageDown => 0x22,
+        K::Insert => 0x2D, K::Delete => 0x2E,
+        K::Minus => 0xBD, K::Equal => 0xBB, K::BracketLeft => 0xDB, K::BracketRight => 0xDD,
+        K::Backslash => 0xDC, K::Semicolon => 0xBA, K::Quote => 0xDE, K::Backquote => 0xC0,
+        K::Comma => 0xBC, K::Period => 0xBE, K::Slash => 0xBF,
+        _ => return None,
+    })
 }
 
 // Top-level init failures (event loop / GPU) are fatal and worth a panic.
@@ -391,16 +542,22 @@ fn main() {
     keep_awake(); // never let App Nap / display sleep throttle the stream
 
     let latest: Arc<Mutex<Option<VideoFrame>>> = Arc::new(Mutex::new(None));
+    // Captured input (main/winit thread) -> network thread -> control channel.
+    let (input_tx, input_rx) = std::sync::mpsc::channel::<Vec<u8>>();
 
     // Headless mode: run the full pair → stream → depacketize → decode loop on
-    // this thread and log decoded frames — no window. Validates HW decode over a
-    // headless/SSH session where a GPU window can't be created.
+    // this thread and log decoded frames — no window (no input source). Validates
+    // HW decode over a headless/SSH session where a GPU window can't be created.
     if env("STARFIRE_HEADLESS").is_some() {
-        run_session(latest, |e| {
-            if let AppEvent::Stopped(m) = e {
-                eprintln!("[starfire] stopped: {m}");
-            }
-        });
+        run_session(
+            latest,
+            |e| {
+                if let AppEvent::Stopped(m) = e {
+                    eprintln!("[starfire] stopped: {m}");
+                }
+            },
+            input_rx,
+        );
         return;
     }
 
@@ -410,15 +567,20 @@ fn main() {
     let proxy = event_loop.create_proxy();
     {
         let latest = latest.clone();
-        thread::spawn(move || run_session(latest, move |e| {
-            let _ = proxy.send_event(e);
-        }));
+        thread::spawn(move || {
+            run_session(latest, move |e| {
+                let _ = proxy.send_event(e);
+            }, input_rx)
+        });
     }
 
     let mut app = App {
         latest,
         window: None,
         renderer: None,
+        input_tx,
+        grabbed: false,
+        modifiers: 0,
     };
     event_loop.run_app(&mut app).expect("run event loop");
 }
