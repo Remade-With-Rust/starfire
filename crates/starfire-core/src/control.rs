@@ -100,6 +100,12 @@ impl ControlChannel {
         })
     }
 
+    /// Current ENet round-trip time to the host (network latency). ENet keeps
+    /// this updated from its periodic pings; poll the channel to refresh it.
+    pub fn rtt(&mut self) -> std::time::Duration {
+        self.host.peer(self.peer).round_trip_time()
+    }
+
     /// Send a raw (already-framed) control packet, reliably.
     pub fn send(&mut self, channel: u8, data: &[u8]) -> crate::Result<()> {
         let packet = enet::Packet::reliable(data);

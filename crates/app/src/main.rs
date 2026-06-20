@@ -137,6 +137,145 @@ fn submit_pin(host: &str, pin: &str) {
         .output();
 }
 
+/// Benchmark accumulator — the same metrics Moonlight's perf overlay shows, so
+/// back-to-back runs under identical host settings are directly comparable.
+struct BenchStats {
+    start: std::time::Instant,
+    secs: f64,
+    bytes: u64,
+    packets: u64,
+    decode_us: Vec<u32>,
+    interval_us: Vec<u32>,
+    host_lat_tenths: Vec<u16>,
+    rtt_ms: Vec<u32>,
+    last_frame: Option<std::time::Instant>,
+    last_idx: Option<u32>,
+    dropped: u64,
+    width: u32,
+    height: u32,
+}
+
+impl BenchStats {
+    fn new(secs: f64) -> Self {
+        Self {
+            start: std::time::Instant::now(),
+            secs,
+            bytes: 0,
+            packets: 0,
+            decode_us: Vec::new(),
+            interval_us: Vec::new(),
+            host_lat_tenths: Vec::new(),
+            rtt_ms: Vec::new(),
+            last_frame: None,
+            last_idx: None,
+            dropped: 0,
+            width: 0,
+            height: 0,
+        }
+    }
+
+    fn packet(&mut self, n: usize) {
+        self.packets += 1;
+        self.bytes += n as u64;
+    }
+
+    fn frame(&mut self, decode_us: u32, host_lat_tenths: u16, rtt_ms: u32, idx: u32, w: u32, h: u32) {
+        self.decode_us.push(decode_us);
+        self.host_lat_tenths.push(host_lat_tenths);
+        self.rtt_ms.push(rtt_ms);
+        self.width = w;
+        self.height = h;
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_frame {
+            self.interval_us.push(now.duration_since(last).as_micros() as u32);
+        }
+        self.last_frame = Some(now);
+        if let Some(li) = self.last_idx {
+            if idx > li + 1 {
+                self.dropped += (idx - li - 1) as u64;
+            }
+        }
+        self.last_idx = Some(idx);
+    }
+
+    fn done(&self) -> bool {
+        self.start.elapsed().as_secs_f64() >= self.secs
+    }
+
+    fn report(&self) {
+        let dur = self.start.elapsed().as_secs_f64();
+        let n = self.decode_us.len();
+        let pct = |v: &[u32], p: f64| -> f64 {
+            if v.is_empty() {
+                return 0.0;
+            }
+            let mut s = v.to_vec();
+            s.sort_unstable();
+            s[((s.len() - 1) as f64 * p) as usize] as f64 / 1000.0
+        };
+        let avg = |v: &[u32]| -> f64 {
+            if v.is_empty() {
+                0.0
+            } else {
+                v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64 / 1000.0
+            }
+        };
+        let iv_avg = avg(&self.interval_us);
+        let iv_jitter = {
+            if self.interval_us.len() < 2 {
+                0.0
+            } else {
+                let m = iv_avg * 1000.0;
+                let var = self
+                    .interval_us
+                    .iter()
+                    .map(|&x| (x as f64 - m).powi(2))
+                    .sum::<f64>()
+                    / self.interval_us.len() as f64;
+                var.sqrt() / 1000.0
+            }
+        };
+        let host_avg = if self.host_lat_tenths.is_empty() {
+            0.0
+        } else {
+            self.host_lat_tenths.iter().map(|&x| x as f64).sum::<f64>()
+                / self.host_lat_tenths.len() as f64
+                / 10.0
+        };
+        let mbps = self.bytes as f64 * 8.0 / dur / 1e6;
+        let drop_pct = 100.0 * self.dropped as f64 / (n as f64 + self.dropped as f64).max(1.0);
+
+        eprintln!("\n========= STARFIRE BENCHMARK ({dur:.1}s) =========");
+        eprintln!("resolution      : {}x{}", self.width, self.height);
+        eprintln!("frames decoded  : {n}   |   FPS: {:.1}", n as f64 / dur);
+        eprintln!(
+            "decode time     : avg {:.2} ms   p99 {:.2} ms   max {:.2} ms",
+            avg(&self.decode_us),
+            pct(&self.decode_us, 0.99),
+            pct(&self.decode_us, 1.0)
+        );
+        eprintln!(
+            "frame pacing    : avg {iv_avg:.2} ms   jitter(stdev) {iv_jitter:.2} ms   p99 {:.2} ms",
+            pct(&self.interval_us, 0.99)
+        );
+        eprintln!("host latency    : avg {host_avg:.2} ms   (encoder, from frame header)");
+        let rtt_avg = if self.rtt_ms.is_empty() {
+            0.0
+        } else {
+            self.rtt_ms.iter().map(|&x| x as f64).sum::<f64>() / self.rtt_ms.len() as f64
+        };
+        eprintln!("network RTT     : avg {rtt_avg:.1} ms   (ENet control channel)");
+        eprintln!("recv bitrate    : {mbps:.1} Mbps");
+        eprintln!(
+            "packets         : {}   ({:.0}/s)",
+            self.packets,
+            self.packets as f64 / dur
+        );
+        eprintln!("dropped frames  : {}   ({drop_pct:.2}%)", self.dropped);
+        eprintln!("=================================================\n");
+    }
+}
+
 /// The full client bring-up + ingest loop, run on its own thread so the main
 /// thread can own the winit event loop. Decoded frames land in `latest`; each
 /// event (new frame / teardown) is delivered via `emit` — the windowed path
@@ -208,6 +347,16 @@ fn run_session(
     let (mut frames, mut pkts, mut aus, mut errs) = (0u64, 0u64, 0u64, 0u64);
     let mut last_report = std::time::Instant::now();
 
+    // Benchmark mode: measure for STARFIRE_BENCH_SECS (default 20), print a
+    // report, and exit. Run headless for clean numbers.
+    let mut bench = env("STARFIRE_BENCH").map(|_| {
+        let secs = env("STARFIRE_BENCH_SECS")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(20.0);
+        eprintln!("[starfire] benchmarking for {secs}s …");
+        BenchStats::new(secs)
+    });
+
     // One-shot audio fixture capture (datagrams: u16-LE len prefix + bytes), then
     // exit — for offline Opus-decoder development. Set STARFIRE_AUDIO_FIXTURE=path.
     let mut afix: Option<(String, Vec<u8>)> =
@@ -237,6 +386,13 @@ fn run_session(
         while let Ok(msg) = input_rx.try_recv() {
             let _ = sess.send_input(&msg);
         }
+        // Benchmark: finish + report + exit once the window elapses.
+        if let Some(b) = &bench {
+            if b.done() {
+                b.report();
+                std::process::exit(0);
+            }
+        }
         // Periodic pipeline health report (helps diagnose where frames stall).
         if last_report.elapsed() > Duration::from_secs(2) {
             eprintln!("[starfire] rx_pkts={pkts} apkts={apkts} aus={aus} decoded={frames} decode_errs={errs}");
@@ -261,13 +417,28 @@ fn run_session(
             continue;
         };
         pkts += 1;
+        if let Some(b) = bench.as_mut() {
+            b.packet(n);
+        }
         let Some(au) = dep.push(&buf[..n]) else {
             continue;
         };
         aus += 1;
-        match decoder.push(&au) {
+        let (host_lat, frame_idx) = (au.host_latency_tenths_ms, au.frame_index);
+        let rtt_ms = if bench.is_some() {
+            sess.rtt().as_millis() as u32
+        } else {
+            0
+        };
+        let t0 = std::time::Instant::now();
+        let decoded = decoder.push(&au);
+        let decode_us = t0.elapsed().as_micros() as u32;
+        match decoded {
             Ok(Some(frame)) => {
                 frames += 1;
+                if let Some(b) = bench.as_mut() {
+                    b.frame(decode_us, host_lat, rtt_ms, frame_idx, frame.width, frame.height);
+                }
                 if frames <= 3 || frames.is_multiple_of(120) {
                     eprintln!("[starfire] decoded frame {frames}: {}x{}", frame.width, frame.height);
                 }

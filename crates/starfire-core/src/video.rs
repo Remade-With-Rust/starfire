@@ -21,6 +21,10 @@ pub struct AccessUnit {
     pub codec: Codec,
     pub frame_index: u32,
     pub is_keyframe: bool,
+    /// Host-side frame processing latency reported in the SOF header
+    /// (`video_short_frame_header_t.frame_processing_latency`), in 0.1 ms units
+    /// (so `value / 10.0` ms) — the encoder/capture latency on the host.
+    pub host_latency_tenths_ms: u16,
     pub data: Vec<u8>,
 }
 
@@ -620,6 +624,11 @@ pub mod reassembly {
             // present, possibly via FEC) — robust to losing the SOF packet.
             let s0 = self.shards[0].as_ref()?;
             let is_keyframe = s0.get(3).copied() == Some(FRAME_TYPE_IDR);
+            // video_short_frame_header_t.frame_processing_latency (LE u16 @ +1).
+            let host_latency = s0
+                .get(1..3)
+                .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                .unwrap_or(0);
             let last_payload_len = s0
                 .get(4..6)
                 .map(|b| u16::from_le_bytes([b[0], b[1]]) as usize);
@@ -644,6 +653,7 @@ pub mod reassembly {
                 codec: self.codec,
                 frame_index: self.frame_index.unwrap_or(0),
                 is_keyframe,
+                host_latency_tenths_ms: host_latency,
                 data,
             })
         }

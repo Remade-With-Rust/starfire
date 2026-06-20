@@ -173,6 +173,11 @@ impl StreamSession {
         self.last_ping = std::time::Instant::now();
     }
 
+    /// Network round-trip time to the host (ENet control-channel RTT).
+    pub fn rtt(&mut self) -> std::time::Duration {
+        self.control.rtt()
+    }
+
     /// Send one encoded input control message (see [`crate::input`]) to the host
     /// over the ENet control channel (channel 0, reliable). Call immediately per
     /// input event for lowest latency.
