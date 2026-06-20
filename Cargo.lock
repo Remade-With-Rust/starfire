@@ -2514,6 +2514,7 @@ dependencies = [
  "rustls-pki-types",
  "rusty_enet",
  "sha2",
+ "starfire-protocol",
  "starfire-testkit",
  "thiserror 2.0.18",
  "tracing",
@@ -2540,6 +2541,14 @@ name = "starfire-input"
 version = "0.0.0"
 dependencies = [
  "starfire-core",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "starfire-protocol"
+version = "0.0.0"
+dependencies = [
+ "quick-xml 0.36.2",
  "thiserror 2.0.18",
 ]
 

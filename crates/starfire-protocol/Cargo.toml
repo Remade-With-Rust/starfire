@@ -1,0 +1,20 @@
+# starfire-protocol — the shared, direction-agnostic GameStream WIRE layer,
+# extracted from starfire-core so the Starfire client and the Comet host
+# (../../../comet) depend on the SAME bytes and pair flawlessly by construction.
+# Foundation slice: error/wire/hex/xml. The format modules (pairing, rtsp,
+# video FEC, input, serverinfo) migrate here incrementally — starfire-core
+# re-exports everything meanwhile, so its callers are untouched.
+[package]
+name = "starfire-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+quick-xml = { workspace = true } # flat GameStream XML envelopes (xml::parse_flat)

@@ -67,6 +67,18 @@ pub struct AnnounceConfig {
     pub height: u32,
     pub fps: u32,
     pub bitrate_kbps: u32,
+    /// Encoder slices per frame (`videoEncoderSlicesPerFrame`). >1 lets the host
+    /// encode — and us decode — slices in parallel, trading a little coding
+    /// efficiency for lower per-frame latency on multi-core. 1 = single slice.
+    pub slices_per_frame: u32,
+    /// FEC repair overhead percent (`x-nv-vqos[0].fec.repairPercent`). Higher =
+    /// more redundancy (survives more loss) at the cost of bandwidth and packet
+    /// count; on a clean LAN this can be dialled well below the 50 % default.
+    pub fec_percent: u32,
+    /// UDP payload size for video packets (`packetSize`). Larger packets mean
+    /// fewer packets per frame (less overhead) but risk IP fragmentation above
+    /// the path MTU. 1392 is the MTU-safe default.
+    pub packet_size: u32,
     /// `x-ss-general.encryptionEnabled` bitmask. 0 = fully plaintext video +
     /// audio + control (only valid when the host's encryption mode is not
     /// MANDATORY for this client, e.g. `lan_encryption_mode = 0`).
@@ -80,6 +92,9 @@ impl Default for AnnounceConfig {
             height: 1080,
             fps: 60,
             bitrate_kbps: 10_000,
+            slices_per_frame: 1,
+            fec_percent: 50,
+            packet_size: 1392,
             encryption_enabled: 0,
         }
     }
@@ -211,21 +226,24 @@ impl RtspClient {
             format!("a=x-nv-video[0].clientViewportHt:{}", cfg.height),
             format!("a=x-nv-video[0].maxFPS:{}", cfg.fps),
             format!("a=x-nv-video[0].clientRefreshRateX100:{}", cfg.fps * 100),
-            "a=x-nv-video[0].packetSize:1392".to_string(),
+            format!("a=x-nv-video[0].packetSize:{}", cfg.packet_size),
             "a=x-nv-video[0].rateControlMode:4".to_string(),
             "a=x-nv-video[0].timeoutLengthMs:7000".to_string(),
             "a=x-nv-video[0].framesWithInvalidRefThreshold:0".to_string(),
             format!("a=x-nv-video[0].initialBitrateKbps:{kbps}"),
             format!("a=x-nv-video[0].initialPeakBitrateKbps:{kbps}"),
             "a=x-nv-video[0].maxNumReferenceFrames:1".to_string(),
-            "a=x-nv-video[0].videoEncoderSlicesPerFrame:1".to_string(),
+            format!(
+                "a=x-nv-video[0].videoEncoderSlicesPerFrame:{}",
+                cfg.slices_per_frame
+            ),
             "a=x-nv-video[0].encoderCscMode:0".to_string(),
             "a=x-nv-video[0].dynamicRangeMode:0".to_string(),
             format!("a=x-nv-vqos[0].bw.minimumBitrateKbps:{kbps}"),
             format!("a=x-nv-vqos[0].bw.maximumBitrateKbps:{kbps}"),
             "a=x-nv-vqos[0].fec.enable:1".to_string(),
             "a=x-nv-vqos[0].fec.numSrcPackets:0".to_string(),
-            "a=x-nv-vqos[0].fec.repairPercent:50".to_string(),
+            format!("a=x-nv-vqos[0].fec.repairPercent:{}", cfg.fec_percent),
             "a=x-nv-vqos[0].fec.repairMaxPercent:100".to_string(),
             "a=x-nv-vqos[0].fec.minRequiredFecPackets:2".to_string(),
             "a=x-nv-vqos[0].drc.enable:0".to_string(),

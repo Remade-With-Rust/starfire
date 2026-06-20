@@ -3,6 +3,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/starfire-protocol",
     "crates/starfire-core",
     "crates/starfire-decode",
     "crates/starfire-render",

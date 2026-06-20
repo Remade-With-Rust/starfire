@@ -1,12 +1,11 @@
 # Catching Starfire
 
-> **Starfire** is MATA's clean-room, permissively-licensed Rust client for the
-> Sunshine GameStream wire protocol — our Moonlight. It connects to a Sunshine
-> host (the encoder running in the MATA masked Windows gaming VM) and streams
-> the session to a **Windows or macOS** client at the highest achievable
-> performance and quality. We build the PC + Mac client to production grade; we
-> open-source it so the community builds the rest (Linux, mobile, TV, exotic
-> input).
+> **Starfire** is MATA's (www.mata.network) clean-room, permissively-licensed 
+> Rust client for the Sunshine GameStream wire protocol — our Moonlight. 
+> It connects to a Sunshine host (the encoder running in the MATA masked Windows > gaming VM) and streams the session to a **Windows or macOS** client at the 
+> highest achievable performance and quality. We build the PC + Mac client to 
+> production grade; we open-source it so the community builds the rest (Linux, 
+> mobile, TV, exotic input).
 
 Moonlight source: https://github.com/moonlight-stream/moonlight-qt
 

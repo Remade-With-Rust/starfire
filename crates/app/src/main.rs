@@ -50,6 +50,41 @@ fn env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
+/// Read a `u32` stream knob from the environment, falling back to `default`.
+fn env_u32(key: &str, default: u32) -> u32 {
+    env(key).and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// Build the launch + announce configs from environment knobs so a benchmark
+/// sweep can vary resolution / fps / bitrate / slices / FEC without rebuilding:
+/// `STARFIRE_W`, `STARFIRE_H`, `STARFIRE_FPS`, `STARFIRE_BITRATE` (kbps),
+/// `STARFIRE_SLICES`, `STARFIRE_FEC` (repair %), `STARFIRE_PKT` (payload bytes).
+fn stream_configs() -> (LaunchConfig, AnnounceConfig) {
+    let ad = AnnounceConfig::default();
+    let (w, h, fps) = (
+        env_u32("STARFIRE_W", ad.width),
+        env_u32("STARFIRE_H", ad.height),
+        env_u32("STARFIRE_FPS", ad.fps),
+    );
+    let announce = AnnounceConfig {
+        width: w,
+        height: h,
+        fps,
+        bitrate_kbps: env_u32("STARFIRE_BITRATE", ad.bitrate_kbps),
+        slices_per_frame: env_u32("STARFIRE_SLICES", ad.slices_per_frame),
+        fec_percent: env_u32("STARFIRE_FEC", ad.fec_percent),
+        packet_size: env_u32("STARFIRE_PKT", ad.packet_size),
+        encryption_enabled: ad.encryption_enabled,
+    };
+    let launch = LaunchConfig {
+        width: w,
+        height: h,
+        fps,
+        ..LaunchConfig::default()
+    };
+    (launch, announce)
+}
+
 /// Keep the process at full speed for the whole run: disable macOS **App Nap**
 /// (which suspends an unfocused/background GUI app and would stutter — or stall —
 /// the stream) plus idle display sleep, and mark the work latency-critical.
@@ -323,14 +358,18 @@ fn run_session(
         );
     };
 
-    eprintln!("[starfire] launching {app_name:?} and bringing up the data plane …");
-    let mut sess = match StreamSession::start(
-        client,
-        &host,
-        &app,
-        &LaunchConfig::default(),
-        &AnnounceConfig::default(),
-    ) {
+    let (launch_cfg, announce_cfg) = stream_configs();
+    eprintln!(
+        "[starfire] launching {app_name:?} @ {}x{}x{} {}kbps slices={} fec={}% pkt={} …",
+        announce_cfg.width,
+        announce_cfg.height,
+        announce_cfg.fps,
+        announce_cfg.bitrate_kbps,
+        announce_cfg.slices_per_frame,
+        announce_cfg.fec_percent,
+        announce_cfg.packet_size,
+    );
+    let mut sess = match StreamSession::start(client, &host, &app, &launch_cfg, &announce_cfg) {
         Ok(s) => s,
         Err(e) => stop!("session start: {e}"),
     };

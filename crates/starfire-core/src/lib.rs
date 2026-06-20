@@ -16,11 +16,14 @@
 //! input, orchestrated by [`session`]. Every wire type implements [`wire::Wire`]
 //! so it has a uniform golden-test surface (docs/03-bitexact-methodology.md).
 
-pub mod error;
-pub mod hex;
+// The foundation wire modules now live in the shared `starfire-protocol` crate
+// (so the Comet host shares them); re-export so `crate::{error,hex,wire,xml}`
+// and `crate::{Error, Result}` keep resolving unchanged across this crate and
+// its downstream users during the incremental migration.
+pub use starfire_protocol::error::{Error, Result};
+pub use starfire_protocol::{error, hex, wire, xml};
+
 pub mod https;
-pub mod wire;
-pub mod xml;
 
 pub mod audio;
 pub mod control;
@@ -32,5 +35,3 @@ pub mod rtsp;
 pub mod serverinfo;
 pub mod session;
 pub mod video;
-
-pub use error::{Error, Result};
