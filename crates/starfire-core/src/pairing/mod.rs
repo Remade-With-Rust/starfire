@@ -10,11 +10,13 @@
 //!   F2b — client identity (RSA-2048 cert + signature extraction).
 //!   F2c — the `/pair` ladder + auto-PIN, iterated live.
 
-pub mod crypto;
-pub mod identity;
-pub mod ladder;
+// The PIN-challenge crypto and the self-signed identity now live in the shared
+// starfire-protocol crate (Comet's pairing server needs them too); re-export so
+// `crate::pairing::{crypto, identity, ClientIdentity}` keep resolving for the
+// ladder driver and other callers (https.rs, launch.rs).
+pub use starfire_protocol::pairing::{crypto, identity, ClientIdentity};
 
-pub use identity::ClientIdentity;
+pub mod ladder;
 pub use ladder::PairingClient;
 
 /// Session crypto material surfaced by launch/RTSP and consumed by control/input.

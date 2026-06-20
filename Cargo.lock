@@ -2548,8 +2548,14 @@ dependencies = [
 name = "starfire-protocol"
 version = "0.0.0"
 dependencies = [
+ "aes",
+ "getrandom 0.2.17",
+ "p256",
  "quick-xml 0.36.2",
+ "rcgen",
+ "sha2",
  "thiserror 2.0.18",
+ "x509-parser",
 ]
 
 [[package]]

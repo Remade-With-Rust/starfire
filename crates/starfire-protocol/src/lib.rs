@@ -18,6 +18,7 @@
 
 pub mod error;
 pub mod hex;
+pub mod pairing;
 pub mod wire;
 pub mod xml;
 

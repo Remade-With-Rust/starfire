@@ -23,3 +23,10 @@ test-helpers = []
 [dependencies]
 thiserror = { workspace = true }
 quick-xml = { workspace = true } # flat GameStream XML envelopes (xml::parse_flat)
+# pairing crypto (shared client+host): PIN challenge, identity cert, signatures
+sha2 = { workspace = true }
+aes = { workspace = true }
+getrandom = { workspace = true }
+rcgen = { workspace = true }
+p256 = { workspace = true }
+x509-parser = { workspace = true }
