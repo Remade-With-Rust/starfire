@@ -16,6 +16,7 @@
 //! serverinfo) migrate here incrementally; `starfire-core` re-exports each so
 //! its callers stay unchanged throughout.
 
+pub mod auth;
 pub mod error;
 pub mod hex;
 pub mod wire;
