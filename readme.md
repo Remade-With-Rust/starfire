@@ -25,7 +25,7 @@ network, and Starfire's hardware decode on a MacBook Pro.
 |---|---:|---:|:---:|
 | Per-frame decode latency | 3.3 ms | **0.4–1.1 ms** | **~3–8× faster** |
 | Decode → present | CPU copy / blit | **Zero-copy** (D3D11 / Metal) | path eliminated |
-| Dropped frames (LAN) | baseline | **0–2 %** | needs work |
+| Dropped frames (LAN) | 0% | **0–2 %** | needs work |
 
 **Full glass-to-glass — Sunshine (PC) → Starfire (Mac), 1080p60 HEVC:**
 
@@ -69,7 +69,7 @@ malformed packets as normal operating conditions — not crashes.
 ### MAde For MATA
 
 **MATA** has built a proprietary ground up rust implementation of Sunshine to supercharge
-our Starfire implementation. Codenamed comet, the outcomes hit sub-ms speeds for 
+our Starfire implementation. Codenamed Comet, the outcomes hit sub-ms speeds for 
 streaming video and audio, combined with Starfire provide state of the art performance
 for rust deployments. The Gaming tool deploying both of these solutions is free for 
 anyone using our Home Computer application.
