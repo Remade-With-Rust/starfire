@@ -131,6 +131,9 @@ pub struct Client {
     input_tx: Sender<Vec<u8>>,
     /// Raw audio datagrams (taken once by the embedder, if `cfg.audio`).
     audio_rx: Option<Receiver<Vec<u8>>>,
+    /// The decode device (Windows D3D11 zero-copy path), shared with the caller's
+    /// renderer via [`shared_device`](Client::shared_device). `()` elsewhere.
+    shared: Shared,
     /// Background pipeline thread (kept alive for the client's lifetime).
     _thread: JoinHandle<()>,
 }
@@ -148,9 +151,17 @@ impl Client {
             (None, None)
         };
 
+        // Create the decode device up front so it can be shared with both the
+        // decoder (on the pipeline thread) and the caller's renderer.
+        #[cfg(target_os = "windows")]
+        let shared: Shared = starfire_decode::win_device::SharedDevice::create().ok();
+        #[cfg(not(target_os = "windows"))]
+        let shared: Shared = ();
+
         let latest_thread = latest.clone();
+        let shared_thread = shared.clone();
         let _thread = thread::spawn(move || {
-            run_session(cfg, latest_thread, event_tx, input_rx, audio_tx);
+            run_session(cfg, latest_thread, event_tx, input_rx, audio_tx, shared_thread);
         });
 
         Client {
@@ -158,6 +169,7 @@ impl Client {
             event_rx,
             input_tx,
             audio_rx,
+            shared,
             _thread,
         }
     }
@@ -183,6 +195,17 @@ impl Client {
     /// with `starfire-audio` on your side.
     pub fn take_audio(&mut self) -> Option<Receiver<Vec<u8>>> {
         self.audio_rx.take()
+    }
+
+    /// The Windows D3D11 decode device (`None` if it couldn't be created). On
+    /// Windows decoded frames are GPU textures on this device, so build the
+    /// zero-copy renderer on the same device:
+    /// `starfire_render::new_d3d11_for_window(&window, client.shared_device()?, w, h)`.
+    /// (macOS needs no equivalent — its frames are IOSurface-backed and import
+    /// into any Metal device, so `starfire_render::new_for_window` just works.)
+    #[cfg(target_os = "windows")]
+    pub fn shared_device(&self) -> Option<starfire_decode::win_device::SharedDevice> {
+        self.shared.clone()
     }
 }
 
@@ -220,13 +243,10 @@ fn run_session(
     event_tx: Sender<ClientEvent>,
     input_rx: Receiver<Vec<u8>>,
     audio_tx: Option<Sender<Vec<u8>>>,
+    shared: Shared,
 ) {
-    // Create the shared D3D11 device up front (Windows zero-copy path), so it
-    // exists before the decoder is built; `()` elsewhere.
-    #[cfg(target_os = "windows")]
-    let shared: Shared = starfire_decode::win_device::SharedDevice::create().ok();
-    #[cfg(not(target_os = "windows"))]
-    let shared: Shared = ();
+    // The decode device (Windows zero-copy path) is created by `connect` and
+    // shared here; `()` elsewhere.
     #[cfg(not(target_os = "windows"))]
     let _ = &shared;
 
