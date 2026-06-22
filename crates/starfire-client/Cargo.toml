@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "starfire-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Embeddable Starfire client SDK: pair, stream, and hardware-decode a Sunshine/Comet host into VideoFrames, without the winit/wgpu app."
+
+[dependencies]
+starfire-core = { path = "../starfire-core" }
+starfire-decode = { path = "../starfire-decode" }
+
+[lints]
+workspace = true

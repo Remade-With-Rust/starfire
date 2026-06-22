@@ -6,6 +6,7 @@ members = [
     "crates/starfire-protocol",
     "crates/starfire-core",
     "crates/starfire-decode",
+    "crates/starfire-client",
     "crates/starfire-render",
     "crates/starfire-audio",
     "crates/starfire-input",

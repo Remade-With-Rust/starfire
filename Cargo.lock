@@ -2501,6 +2501,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "starfire-client"
+version = "0.0.0"
+dependencies = [
+ "starfire-core",
+ "starfire-decode",
+]
+
+[[package]]
 name = "starfire-core"
 version = "0.0.0"
 dependencies = [
