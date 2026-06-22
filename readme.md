@@ -66,7 +66,7 @@ D3D11VA on Windows, VideoToolbox/Metal on macOS) feeds a **zero-copy** present
 surface, with a bounded, panic-free pipeline that treats loss, reorder, and
 malformed packets as normal operating conditions — not crashes.
 
-### MAde For MATA
+### Made For MATA
 
 **MATA** has built a proprietary ground up rust implementation of Sunshine to supercharge
 our Starfire implementation. Codenamed Comet, the outcomes hit sub-ms speeds for 
