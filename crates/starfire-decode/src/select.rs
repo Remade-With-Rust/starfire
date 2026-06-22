@@ -38,11 +38,8 @@ pub fn create_decoder(codec: Codec, accel: Accel) -> Result<Box<dyn Decoder>, De
 
     #[cfg(target_os = "windows")]
     {
-        // The MFT decoder isn't wired yet: `new()` always reports NoBackend, so
-        // this branch never constructs a `Box<dyn Decoder>`. Once it implements
-        // `Decoder`, return `Ok(Box::new(dec))` here.
-        crate::backend::mediafoundation::MediaFoundationDecoder::new(codec)?;
-        unreachable!("MediaFoundationDecoder::new always errors until implemented");
+        let dec = crate::backend::mediafoundation::MediaFoundationDecoder::new(codec)?;
+        return Ok(Box::new(dec));
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -93,10 +90,13 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_hevc_reports_no_backend_until_mft_lands() {
+    fn windows_hevc_either_decodes_or_cleanly_reports_no_backend() {
+        // With the MF backend wired, this constructs a real hardware decoder on a
+        // box that has one, or degrades to `NoBackend` where none exists — never
+        // panics, never an opaque error.
         assert!(matches!(
             create_decoder(Codec::Hevc, Accel::PreferHardware),
-            Err(DecodeError::NoBackend)
+            Ok(_) | Err(DecodeError::NoBackend)
         ));
     }
 

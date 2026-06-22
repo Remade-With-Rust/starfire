@@ -25,6 +25,10 @@ pub mod gpu;
 #[cfg(target_os = "macos")]
 pub mod metal;
 
+/// Windows zero-copy D3D11 present backend (selected by `new_d3d11_for_window`).
+#[cfg(target_os = "windows")]
+pub mod d3d11;
+
 #[derive(Debug, thiserror::Error)]
 pub enum RenderError {
     #[error("no renderer backend available for this platform yet")]
@@ -185,6 +189,8 @@ pub enum ActiveRenderer {
     Wgpu(VideoRenderer),
     #[cfg(target_os = "macos")]
     Metal(metal::MetalRenderer),
+    #[cfg(target_os = "windows")]
+    D3d11(d3d11::D3d11Renderer),
 }
 
 impl ActiveRenderer {
@@ -194,6 +200,8 @@ impl ActiveRenderer {
             ActiveRenderer::Wgpu(r) => r.resize(width, height),
             #[cfg(target_os = "macos")]
             ActiveRenderer::Metal(r) => r.resize(width, height),
+            #[cfg(target_os = "windows")]
+            ActiveRenderer::D3d11(r) => r.resize(width, height),
         }
     }
 }
@@ -204,6 +212,8 @@ impl Renderer for ActiveRenderer {
             ActiveRenderer::Wgpu(r) => r.set_color_mode(mode),
             #[cfg(target_os = "macos")]
             ActiveRenderer::Metal(r) => r.set_color_mode(mode),
+            #[cfg(target_os = "windows")]
+            ActiveRenderer::D3d11(r) => r.set_color_mode(mode),
         }
     }
     fn present(&mut self, frame: &VideoFrame) -> Result<(), RenderError> {
@@ -211,8 +221,27 @@ impl Renderer for ActiveRenderer {
             ActiveRenderer::Wgpu(r) => r.present(frame),
             #[cfg(target_os = "macos")]
             ActiveRenderer::Metal(r) => r.present(frame),
+            #[cfg(target_os = "windows")]
+            ActiveRenderer::D3d11(r) => r.present(frame),
         }
     }
+}
+
+/// Build the Windows zero-copy D3D11 renderer on the shared decode device. The
+/// app uses this (instead of [`new_for_window`]) when the decoder produces D3D11
+/// textures. `STARFIRE_VSYNC=0` → immediate present.
+#[cfg(target_os = "windows")]
+pub fn new_d3d11_for_window<W: winit::raw_window_handle::HasWindowHandle>(
+    window: &W,
+    shared: starfire_decode::win_device::SharedDevice,
+    width: u32,
+    height: u32,
+) -> Result<ActiveRenderer, RenderError> {
+    let vsync = !matches!(
+        std::env::var("STARFIRE_VSYNC").ok().as_deref(),
+        Some("0") | Some("false") | Some("off") | Some("no")
+    );
+    d3d11::D3d11Renderer::new(window, shared, width, height, vsync).map(ActiveRenderer::D3d11)
 }
 
 /// Build the renderer for `window`. On macOS, the zero-copy Metal backend unless

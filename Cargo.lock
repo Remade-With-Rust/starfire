@@ -2527,6 +2527,7 @@ version = "0.0.0"
 dependencies = [
  "starfire-core",
  "thiserror 2.0.18",
+ "windows 0.58.0",
 ]
 
 [[package]]
@@ -2567,6 +2568,7 @@ dependencies = [
  "starfire-decode",
  "thiserror 2.0.18",
  "wgpu",
+ "windows 0.58.0",
  "winit",
 ]
 

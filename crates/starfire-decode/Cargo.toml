@@ -13,5 +13,18 @@ starfire-core = { path = "../starfire-core" }
 thiserror = { workspace = true }
 # Per-OS HW decode + dav1d are added behind cfg as backends land (docs/04).
 
+# Windows hardware HEVC decode via Media Foundation (the async hardware decoder
+# MFT + D3D11). MIT/Apache `windows` crate — no proprietary SDK, no ffmpeg.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_Media_MediaFoundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+] }
+
 [lints]
 workspace = true

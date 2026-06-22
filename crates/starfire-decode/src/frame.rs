@@ -118,6 +118,26 @@ pub mod native {
     unsafe impl Send for NativeSurface {}
 }
 
+/// Windows zero-copy seam: a decoded NV12 frame held in a D3D11 texture on the
+/// shared decode/render device, so the D3D11 renderer samples it directly (no
+/// `Lock2D` readback, no GPU re-upload). When present, the frame's `planes` are
+/// empty. The texture lives on a multithread-protected device shared by the
+/// decoder and renderer, so no cross-device handle sharing is needed.
+#[cfg(target_os = "windows")]
+pub mod native_win {
+    use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
+
+    /// A decoded NV12 frame in a D3D11 texture (subresource 0).
+    #[derive(Debug, Clone)]
+    pub struct D3d11Frame {
+        pub texture: ID3D11Texture2D,
+    }
+
+    // The texture is only used on the shared, multithread-protected D3D11 device;
+    // the frame is moved from the decode thread to the render thread.
+    unsafe impl Send for D3d11Frame {}
+}
+
 /// A decoded frame in CPU memory, ready for the renderer to upload as textures.
 ///
 /// Invariants (checked by [`VideoFrame::validate`]):
@@ -130,7 +150,10 @@ pub mod native {
 /// `Clone`/`PartialEq`/`Eq` are derived everywhere except macOS, where the
 /// retained native handle is neither cloneable nor comparable. No consumer
 /// clones or compares a `VideoFrame`, so this is invisible to callers.
-#[cfg_attr(not(target_os = "macos"), derive(Clone, PartialEq, Eq))]
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "windows")),
+    derive(Clone, PartialEq, Eq)
+)]
 #[derive(Debug)]
 pub struct VideoFrame {
     /// Visible width in luma samples.
@@ -149,6 +172,10 @@ pub struct VideoFrame {
     /// ⇒ `planes` is empty and the renderer samples the surface directly.
     #[cfg(target_os = "macos")]
     pub native: Option<native::NativeSurface>,
+    /// Windows only: a D3D11 NV12 texture for zero-copy D3D11 present. `Some` ⇒
+    /// `planes` is empty and the renderer samples the texture directly.
+    #[cfg(target_os = "windows")]
+    pub native_d3d11: Option<native_win::D3d11Frame>,
 }
 
 impl VideoFrame {
@@ -201,6 +228,10 @@ impl VideoFrame {
         if self.native.is_some() {
             return Ok(());
         }
+        #[cfg(target_os = "windows")]
+        if self.native_d3d11.is_some() {
+            return Ok(());
+        }
         let expected = Self::plane_count(self.format);
         if self.planes.len() != expected {
             return Err(format!(
@@ -251,6 +282,8 @@ mod tests {
             ],
             #[cfg(target_os = "macos")]
             native: None,
+            #[cfg(target_os = "windows")]
+            native_d3d11: None,
         }
     }
 
@@ -288,6 +321,8 @@ mod tests {
             ],
             #[cfg(target_os = "macos")]
             native: None,
+            #[cfg(target_os = "windows")]
+            native_d3d11: None,
         };
         assert_eq!(f.plane_rows(1), 2);
         assert_eq!(f.plane_sample_width(1), 2);

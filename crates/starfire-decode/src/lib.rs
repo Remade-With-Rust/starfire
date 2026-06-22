@@ -34,6 +34,9 @@ pub mod annexb;
 pub mod backend;
 pub mod frame;
 pub mod select;
+/// Shared D3D11 device for the Windows zero-copy decode → present pipeline.
+#[cfg(target_os = "windows")]
+pub mod win_device;
 
 pub use frame::{ColorSpace, PixelFormat, Plane, VideoFrame};
 

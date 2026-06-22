@@ -16,5 +16,17 @@ winit = { workspace = true }
 pollster = { workspace = true }
 bytemuck = { workspace = true }
 
+# Native D3D11 zero-copy renderer (Windows): present decoded NV12 textures on the
+# shared decode device, no wgpu re-upload. MIT/Apache `windows` crate.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+] }
+
 [lints]
 workspace = true

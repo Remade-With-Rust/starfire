@@ -38,6 +38,14 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
+/// A shared D3D11 device threaded to both the decoder and the D3D11 renderer on
+/// Windows (the zero-copy path), so decoded textures need no cross-device sharing.
+/// `Some` ⇒ use the zero-copy D3D11 path; `None`/`()` ⇒ the portable wgpu path.
+#[cfg(target_os = "windows")]
+type Shared = Option<starfire_decode::win_device::SharedDevice>;
+#[cfg(not(target_os = "windows"))]
+type Shared = ();
+
 /// Wake-ups sent from the network/decode thread to the render loop.
 enum AppEvent {
     /// A new decoded frame is available in the shared slot.
@@ -319,7 +327,10 @@ fn run_session(
     latest: Arc<Mutex<Option<VideoFrame>>>,
     emit: impl Fn(AppEvent),
     input_rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    shared: Shared,
 ) {
+    #[cfg(not(target_os = "windows"))]
+    let _ = &shared;
     macro_rules! stop {
         ($($arg:tt)*) => {{
             emit(AppEvent::Stopped(format!($($arg)*)));
@@ -374,7 +385,22 @@ fn run_session(
         Err(e) => stop!("session start: {e}"),
     };
 
-    let mut decoder = match create_decoder(Codec::Hevc, Accel::PreferHardware) {
+    // On Windows, build the decoder on the shared D3D11 device (zero-copy textures
+    // the D3D11 renderer can sample); otherwise the portable factory.
+    #[cfg(target_os = "windows")]
+    let made = match &shared {
+        Some(dev) => {
+            starfire_decode::backend::mediafoundation::MediaFoundationDecoder::with_device(
+                Codec::Hevc,
+                dev.clone(),
+            )
+            .map(|d| Box::new(d) as Box<dyn starfire_decode::Decoder>)
+        }
+        None => create_decoder(Codec::Hevc, Accel::PreferHardware),
+    };
+    #[cfg(not(target_os = "windows"))]
+    let made = create_decoder(Codec::Hevc, Accel::PreferHardware);
+    let mut decoder = match made {
         Ok(d) => d,
         Err(e) => stop!("no video decoder on this platform: {e}"),
     };
@@ -591,6 +617,8 @@ struct App {
     /// Latest decoded frame size, the reference viewport for absolute-mouse
     /// coordinates (updated each frame).
     stream_size: Option<(u32, u32)>,
+    /// Shared D3D11 device for the Windows zero-copy renderer (`()` elsewhere).
+    shared: Shared,
 }
 
 impl App {
@@ -687,7 +715,17 @@ impl ApplicationHandler<AppEvent> for App {
         };
         self.fullscreen = start_fs;
         let size = window.inner_size();
-        match new_for_window(window.clone(), size.width.max(1), size.height.max(1)) {
+        let (w, h) = (size.width.max(1), size.height.max(1));
+        // Windows zero-copy: the D3D11 renderer on the shared decode device; else
+        // the portable wgpu renderer.
+        #[cfg(target_os = "windows")]
+        let made = match &self.shared {
+            Some(dev) => starfire_render::new_d3d11_for_window(&window, dev.clone(), w, h),
+            None => new_for_window(window.clone(), w, h),
+        };
+        #[cfg(not(target_os = "windows"))]
+        let made = new_for_window(window.clone(), w, h);
+        match made {
             Ok(r) => self.renderer = Some(r),
             Err(e) => {
                 eprintln!("[starfire] renderer init failed: {e}");
@@ -858,6 +896,24 @@ fn main() {
     // Captured input (main/winit thread) -> network thread -> control channel.
     let (input_tx, input_rx) = std::sync::mpsc::channel::<Vec<u8>>();
 
+    // One D3D11 device shared by the decoder + the D3D11 renderer (Windows
+    // zero-copy). Created up front so it exists before both. `STARFIRE_ZEROCOPY=0`
+    // (or device-create failure) falls back to the portable wgpu path.
+    #[cfg(target_os = "windows")]
+    let shared: Shared = {
+        let zc = !matches!(
+            env("STARFIRE_ZEROCOPY").as_deref(),
+            Some("0") | Some("off") | Some("false") | Some("no")
+        );
+        if zc {
+            starfire_decode::win_device::SharedDevice::create().ok()
+        } else {
+            None
+        }
+    };
+    #[cfg(not(target_os = "windows"))]
+    let shared: Shared = ();
+
     // Headless mode: run the full pair → stream → depacketize → decode loop on
     // this thread and log decoded frames — no window (no input source). Validates
     // HW decode over a headless/SSH session where a GPU window can't be created.
@@ -870,6 +926,7 @@ fn main() {
                 }
             },
             input_rx,
+            shared,
         );
         return;
     }
@@ -880,10 +937,11 @@ fn main() {
     let proxy = event_loop.create_proxy();
     {
         let latest = latest.clone();
+        let shared_net = shared.clone();
         thread::spawn(move || {
             run_session(latest, move |e| {
                 let _ = proxy.send_event(e);
-            }, input_rx)
+            }, input_rx, shared_net)
         });
     }
 
@@ -896,6 +954,7 @@ fn main() {
         modifiers: 0,
         fullscreen: false,
         stream_size: None,
+        shared,
     };
     event_loop.run_app(&mut app).expect("run event loop");
 }
