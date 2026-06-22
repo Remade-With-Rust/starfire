@@ -309,7 +309,10 @@ impl RtspClient {
         let mut ping_payload = Vec::new();
         let mut control_connect_data = 0u32;
 
-        for stream in ["audio", "video", "control"] {
+        // SETUP order matches Moonlight (video, audio, control). The host streams
+        // to the address that pinged each stream's port, and pairs ports by SETUP
+        // order — requesting audio first mis-binds video to the audio socket.
+        for stream in ["video", "audio", "control"] {
             let uri = format!("{target}/streamid={stream}");
             let resp = self.request(
                 "SETUP",
@@ -333,11 +336,13 @@ impl RtspClient {
                 session_id = s.split(';').next().unwrap_or(s).trim().to_string();
             }
             if let Some(p) = resp.header("X-SS-Ping-Payload") {
-                // The header is the hex encoding of the host's random ping bytes;
-                // the client must send the DECODED bytes to the media UDP ports
-                // (Sunshine substring-matches them). Confirmed live: sending the
-                // literal hex string instead → "Initial Ping Timeout".
-                ping_payload = crate::hex::decode(p.trim()).unwrap_or_else(|_| p.as_bytes().to_vec());
+                // The client sends the header's **literal ASCII bytes** to the
+                // media UDP ports — NOT hex-decoded. moonlight-common-c does
+                // `memcpy(SS_PING.payload, header, strlen(header))` with
+                // `strlen == sizeof(payload)` (16); the host registers the session
+                // under those exact bytes and matches the client's ping against
+                // them. [SOURCE: moonlight-common-c RtspConnection.c — structure]
+                ping_payload = p.trim().as_bytes().to_vec();
             }
             if let Some(c) = resp.header("X-SS-Connect-Data") {
                 control_connect_data = c.trim().parse().unwrap_or(0);

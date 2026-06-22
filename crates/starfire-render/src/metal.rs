@@ -109,6 +109,20 @@ struct CGSize {
     height: f64,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CGPoint {
+    x: f64,
+    y: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CGRect {
+    origin: CGPoint,
+    size: CGSize,
+}
+
 /// Uniform handed to the fragment shader (mirrors `Params` in `yuv.metal`).
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -175,6 +189,17 @@ unsafe fn msg_void_size(obj: Id, s: Sel, a: CGSize) {
     f(obj, s, a)
 }
 #[inline]
+unsafe fn msg_ret_rect(obj: Id, s: Sel) -> CGRect {
+    // arm64 returns a 4-double struct (CGRect) in d0–d3 via the normal objc_msgSend.
+    let f: extern "C" fn(Id, Sel) -> CGRect = mem::transmute(objc_msgSend as *const ());
+    f(obj, s)
+}
+#[inline]
+unsafe fn msg_void_rect(obj: Id, s: Sel, a: CGRect) {
+    let f: extern "C" fn(Id, Sel, CGRect) = mem::transmute(objc_msgSend as *const ());
+    f(obj, s, a)
+}
+#[inline]
 unsafe fn msg_str(obj: Id, s: Sel, a: *const c_char) -> Id {
     let f: extern "C" fn(Id, Sel, *const c_char) -> Id = mem::transmute(objc_msgSend as *const ());
     f(obj, s, a)
@@ -229,11 +254,16 @@ pub struct MetalRenderer {
     queue: Id,
     pipeline: Id,
     layer: Id,
+    /// The winit window's `NSView` — kept so `resize` can re-read its point-space
+    /// bounds and keep the hosted layer's frame matching the view.
+    ns_view: Id,
     cache: CVMetalTextureCacheRef,
     color_mode: ColorMode,
     /// Previous present's resources, released one frame later (GPU-completion).
     last_hold: Option<FrameHold>,
     prev_hold: Option<FrameHold>,
+    dbg: bool,
+    present_count: u64,
 }
 
 // The Metal/CA objects are only ever touched on the main thread (the renderer is
@@ -367,25 +397,50 @@ impl MetalRenderer {
                 msg_void_f64(layer, sel(c"setContentsScale:"), scale);
             }
         }
-        msg_void_bool(ns_view, sel(c"setWantsLayer:"), true);
+        // Layer-HOSTING order matters: install our CAMetalLayer FIRST, then set
+        // wantsLayer. If wantsLayer is set first, AppKit creates and keeps its own
+        // backing layer and our Metal layer never becomes the view's displayed
+        // layer — frames render correctly but off-screen (no error, no visible
+        // video). [SOURCE: Apple NSView layer-hosting docs — set layer, then
+        // wantsLayer.]
         msg_void_id(ns_view, sel(c"setLayer:"), layer);
+        msg_void_bool(ns_view, sel(c"setWantsLayer:"), true);
+        // A layer-HOSTING view does not auto-size its hosted layer, so give the
+        // layer the view's point-space bounds explicitly — otherwise it has a
+        // 0×0 frame and stays invisible even though the drawable renders fine.
+        let bounds = msg_ret_rect(ns_view, sel(c"bounds"));
+        msg_void_rect(layer, sel(c"setFrame:"), bounds);
         // Keep our own +1 on the layer for the renderer's lifetime.
         let _ = CFRetain(layer);
+
+        if std::env::var("STARFIRE_RENDERDBG").is_ok() {
+            let scale = msg_ret_f64(layer, sel(c"contentsScale"));
+            eprintln!(
+                "[renderdbg] Metal layer attached to NSView {:p}; view bounds={}x{} \
+                 layer.frame={}x{} drawableSize={}x{} contentsScale={}",
+                ns_view, bounds.size.width, bounds.size.height,
+                bounds.size.width, bounds.size.height, width, height, scale
+            );
+        }
 
         Ok(Self {
             device,
             queue,
             pipeline,
             layer,
+            ns_view,
             cache,
             color_mode: ColorMode::Bt709Sdr,
             last_hold: None,
             prev_hold: None,
+            dbg: std::env::var("STARFIRE_RENDERDBG").is_ok(),
+            present_count: 0,
         })
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
         unsafe {
+            // Backing store in pixels …
             msg_void_size(
                 self.layer,
                 sel(c"setDrawableSize:"),
@@ -394,6 +449,10 @@ impl MetalRenderer {
                     height: height.max(1) as f64,
                 },
             );
+            // … and keep the hosted layer's frame matching the view's point-space
+            // bounds (the view doesn't do this for a hosted layer).
+            let bounds = msg_ret_rect(self.ns_view, sel(c"bounds"));
+            msg_void_rect(self.layer, sel(c"setFrame:"), bounds);
         }
     }
 
@@ -437,8 +496,17 @@ impl Renderer for MetalRenderer {
     }
 
     fn present(&mut self, frame: &VideoFrame) -> Result<(), RenderError> {
+        self.present_count += 1;
+        let log = self.dbg && (self.present_count <= 3 || self.present_count % 120 == 0);
         let Some(pb) = frame.native.as_ref().map(|s| s.as_ptr()) else {
             // Not a zero-copy frame — nothing for the Metal path to draw.
+            if self.dbg && self.present_count <= 3 {
+                eprintln!(
+                    "[renderdbg] present #{}: frame.native=None (CPU planes) — Metal path draws nothing; \
+                     check STARFIRE_ZEROCOPY",
+                    self.present_count
+                );
+            }
             return Ok(());
         };
         let (w, h) = (frame.width as usize, frame.height as usize);
@@ -459,9 +527,22 @@ impl Renderer for MetalRenderer {
                     return Err(RenderError::Failed("CbCr plane texture import failed".into()));
                 };
 
+                if log {
+                    eprintln!(
+                        "[renderdbg] present #{}: native ok, {}x{}, Y+CbCr textures imported",
+                        self.present_count, w, h
+                    );
+                }
                 let drawable = msg(self.layer, sel(c"nextDrawable"));
                 if drawable.is_null() {
                     // Drawable pool exhausted — drop this frame rather than block.
+                    if self.dbg {
+                        eprintln!(
+                            "[renderdbg] present #{}: nextDrawable returned NIL — frame dropped \
+                             (layer not laid out / drawableSize wrong?)",
+                            self.present_count
+                        );
+                    }
                     CFRelease(tex_y);
                     CFRelease(tex_cbcr);
                     return Ok(());
@@ -519,6 +600,12 @@ impl Renderer for MetalRenderer {
                 msg(enc, sel(c"endEncoding"));
                 msg_void_id(cb, sel(c"presentDrawable:"), drawable);
                 msg(cb, sel(c"commit"));
+                if log {
+                    eprintln!(
+                        "[renderdbg] present #{}: committed + presentDrawable (frame should be visible)",
+                        self.present_count
+                    );
+                }
 
                 // Rotate the GPU-completion holders: the resources two frames old
                 // are released now (their command buffer has long completed); this

@@ -82,6 +82,22 @@ pub struct StreamSession {
     host: String,
     video_port: u16,
     audio_port: u16,
+    /// Sunshine's `X-SS-Ping-Payload` token. The host only accepts a media-port
+    /// ping that carries this exact payload (it identifies the session and learns
+    /// our return address from it). Empty ⇒ fall back to the legacy `"PING"`.
+    ping_payload: Vec<u8>,
+    /// `SS_PING.sequenceNumber` — bumped per ping. The host ignores it for the
+    /// payload match, but it's part of the 20-byte struct the host expects.
+    ping_seq: u32,
+    /// Demultiplexed receive queues. Both media sockets are drained together and
+    /// each datagram is sorted by its **source port** — video RTP always originates
+    /// from `video_port`, audio from `audio_port` — so a stream is delivered to the
+    /// right consumer no matter which local socket the host actually sent it to.
+    /// This makes ingest immune to Sunshine routing both streams onto one socket
+    /// (which it does when its shared-payload ping registration races, or when the
+    /// client and host share an IP). See [`pump`](StreamSession::pump).
+    video_q: std::collections::VecDeque<Vec<u8>>,
+    audio_q: std::collections::VecDeque<Vec<u8>>,
     last_ping: std::time::Instant,
     recv_err_logged: bool,
 }
@@ -136,11 +152,15 @@ impl StreamSession {
             crate::Error::Protocol(format!("ENet control connect failed: {last_err}"))
         })?;
 
-        let video = UdpSocket::bind("0.0.0.0:0")?;
-        let audio = UdpSocket::bind("0.0.0.0:0")?;
-        // Video paces the pump (short blocking read); audio is drained
-        // non-blocking each loop so it never adds latency to the video path.
-        video.set_read_timeout(Some(Duration::from_millis(4)))?;
+        // Bind the media ports we advertised in RTSP SETUP (X-GS-ClientPort=
+        // 50000-50001) so the host streams to where we listen, whether it uses the
+        // SETUP port or the ping source. Fall back to ephemeral if taken.
+        let video = UdpSocket::bind("0.0.0.0:50000").or_else(|_| UdpSocket::bind("0.0.0.0:0"))?;
+        let audio = UdpSocket::bind("0.0.0.0:50001").or_else(|_| UdpSocket::bind("0.0.0.0:0"))?;
+        // Both sockets are non-blocking; [`pump`] drains both and sorts datagrams
+        // by source port. poll_video adds the only pacing wait (a short sleep when
+        // no video is queued) so the caller's loop doesn't busy-spin.
+        video.set_nonblocking(true)?;
         audio.set_nonblocking(true)?;
 
         eprintln!(
@@ -158,6 +178,10 @@ impl StreamSession {
             host: host.to_string(),
             video_port: rs.ports.video_port,
             audio_port: rs.ports.audio_port,
+            ping_payload: rs.ping_payload,
+            ping_seq: 0,
+            video_q: std::collections::VecDeque::new(),
+            audio_q: std::collections::VecDeque::new(),
             last_ping: Instant::now() - Duration::from_secs(1),
             recv_err_logged: false,
         };
@@ -165,11 +189,40 @@ impl StreamSession {
         Ok(s)
     }
 
-    /// Send the legacy `"PING"` hole-punch to both media ports (the host learns
-    /// our return address from it and starts/keeps streaming).
+    /// Ping both media ports so the host learns our return address per stream and
+    /// starts / keeps streaming. Stock Sunshine requires its per-session
+    /// `X-SS-Ping-Payload` token; older hosts accept the legacy `"PING"`.
+    ///
+    /// **Each socket pings its OWN stream's port** with the same session payload:
+    /// the host routes each stream's RTP back to the source address+port of the
+    /// ping that arrived on that stream's port. Video pings `video_port` from the
+    /// video socket; audio pings `audio_port` from the audio socket. This mirrors
+    /// Moonlight and gives independent per-stream return paths. [SOURCE: observed
+    /// Sunshine wire behavior — distinct source ports ping distinct server ports
+    /// with the same 16-byte payload; verified against stock Sunshine from a
+    /// separate client machine, both video and audio routed correctly.]
+    ///
+    /// If Sunshine's shared-payload ping registration races (or the client and
+    /// host share an IP) it can route both streams onto one socket — [`pump`] makes
+    /// that harmless by demultiplexing on the source port, so we always ping both.
+    ///
+    /// [`pump`]: StreamSession::pump
     fn ping(&mut self) {
-        let _ = self.video.send_to(b"PING", (self.host.as_str(), self.video_port));
-        let _ = self.audio.send_to(b"PING", (self.host.as_str(), self.audio_port));
+        if self.ping_payload.len() == 16 {
+            // SS_PING (packed, 20 bytes): the 16-byte literal payload + a u32
+            // big-endian sequence. The host matches the payload (ignoring the
+            // sequence) and learns our per-stream return address.
+            let mut pkt = [0u8; 20];
+            pkt[..16].copy_from_slice(&self.ping_payload);
+            pkt[16..20].copy_from_slice(&self.ping_seq.to_be_bytes());
+            self.ping_seq = self.ping_seq.wrapping_add(1);
+            let _ = self.video.send_to(&pkt, (self.host.as_str(), self.video_port));
+            let _ = self.audio.send_to(&pkt, (self.host.as_str(), self.audio_port));
+        } else {
+            // Legacy 4-byte hole-punch (older hosts match by source address).
+            let _ = self.video.send_to(b"PING", (self.host.as_str(), self.video_port));
+            let _ = self.audio.send_to(b"PING", (self.host.as_str(), self.audio_port));
+        }
         self.last_ping = std::time::Instant::now();
     }
 
@@ -208,40 +261,86 @@ impl StreamSession {
         self.control.send(0, &m)
     }
 
-    /// Pump the session once and return one received video datagram's length (in
-    /// `buf`) if available. Keeps the control peer alive and re-pings periodically.
-    /// Call in a tight loop on the network thread.
+    /// Drain **both** media sockets (non-blocking) into the per-stream queues,
+    /// classifying each datagram by its **source port**: a packet from
+    /// `audio_port` is audio, anything else (i.e. `video_port`) is video. This is
+    /// the heart of the demux — it recovers the correct stream regardless of which
+    /// local socket the host routed it to, so a Sunshine ping-registration race
+    /// (both streams on one socket) or a co-located client can't break ingest.
+    fn pump(&mut self) {
+        let mut buf = [0u8; 2048];
+        // Drain video socket then audio socket fully; order within a single source
+        // stream is preserved because each stream arrives on exactly one socket.
+        for which in 0..2 {
+            loop {
+                let sock = if which == 0 { &self.video } else { &self.audio };
+                match sock.recv_from(&mut buf) {
+                    Ok((n, src)) => {
+                        let pkt = buf[..n].to_vec();
+                        if src.port() == self.audio_port {
+                            self.audio_q.push_back(pkt);
+                        } else {
+                            self.video_q.push_back(pkt);
+                        }
+                    }
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        break
+                    }
+                    Err(e) => {
+                        if !self.recv_err_logged {
+                            eprintln!("[stream] media recv error: {e} (kind {:?})", e.kind());
+                            self.recv_err_logged = true;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Return one demultiplexed video datagram's length (copied into `buf`) if one
+    /// is available. Keeps the control peer alive, re-pings periodically, and adds
+    /// the loop's only pacing wait — a short sleep when no video is queued — so the
+    /// caller's tight loop doesn't busy-spin. Call in a loop on the network thread.
     pub fn poll_video(&mut self, buf: &mut [u8]) -> Option<usize> {
         let _ = self.control.poll();
         if self.last_ping.elapsed() > std::time::Duration::from_millis(200) {
             self.ping();
         }
-        match self.video.recv_from(buf) {
-            Ok((n, _)) => Some(n),
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => None,
-            Err(e) => {
-                if !self.recv_err_logged {
-                    eprintln!("[stream] video recv error: {e} (kind {:?})", e.kind());
-                    self.recv_err_logged = true;
-                }
-                None
-            }
+        self.pump();
+        if self.video_q.is_empty() {
+            // No video queued — wait briefly (the pacing the blocking read used to
+            // provide) then drain once more, so idle iterations don't busy-spin.
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            self.pump();
         }
+        self.video_q.pop_front().map(|pkt| {
+            let n = pkt.len().min(buf.len());
+            buf[..n].copy_from_slice(&pkt[..n]);
+            n
+        })
     }
 
-    /// Drain one audio datagram (non-blocking) into `buf`, returning its length.
-    /// Independent of the video path — audio never gates video. Returns `None`
-    /// when no audio packet is queued. The keepalive ping is driven by
-    /// [`poll_video`], so audio can be fully ignored (muted) without the host
-    /// tearing the session down.
+    /// Drain one demultiplexed audio datagram into `buf`, returning its length, or
+    /// `None` when none is queued. Independent of the video path — audio never
+    /// gates video. The keepalive ping is driven by [`poll_video`], so audio can be
+    /// fully ignored (muted) without the host tearing the session down.
     ///
     /// [`poll_video`]: StreamSession::poll_video
     pub fn poll_audio(&mut self, buf: &mut [u8]) -> Option<usize> {
-        self.audio.recv_from(buf).ok().map(|(n, _)| n)
+        if self.audio_q.is_empty() {
+            self.pump();
+        }
+        self.audio_q.pop_front().map(|pkt| {
+            let n = pkt.len().min(buf.len());
+            buf[..n].copy_from_slice(&pkt[..n]);
+            n
+        })
     }
 }
 

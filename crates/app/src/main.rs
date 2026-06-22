@@ -196,6 +196,8 @@ struct BenchStats {
     dropped: u64,
     width: u32,
     height: u32,
+    audio_packets: u64,
+    audio_bytes: u64,
 }
 
 impl BenchStats {
@@ -214,12 +216,19 @@ impl BenchStats {
             dropped: 0,
             width: 0,
             height: 0,
+            audio_packets: 0,
+            audio_bytes: 0,
         }
     }
 
     fn packet(&mut self, n: usize) {
         self.packets += 1;
         self.bytes += n as u64;
+    }
+
+    fn audio(&mut self, n: usize) {
+        self.audio_packets += 1;
+        self.audio_bytes += n as u64;
     }
 
     fn frame(&mut self, decode_us: u32, host_lat_tenths: u16, rtt_ms: u32, idx: u32, w: u32, h: u32) {
@@ -315,6 +324,22 @@ impl BenchStats {
             self.packets as f64 / dur
         );
         eprintln!("dropped frames  : {}   ({drop_pct:.2}%)", self.dropped);
+        // Audio plane (Opus, decoded on its own thread; counted at ingest).
+        let ambps = self.audio_bytes as f64 * 8.0 / dur / 1e3;
+        eprintln!(
+            "audio           : {} pkts ({:.0}/s)   {:.0} kbps",
+            self.audio_packets,
+            self.audio_packets as f64 / dur,
+            ambps
+        );
+        // Combined pipeline latency: host encode (Sunshine) + one-way network
+        // (RTT/2) + client decode. Display adds ~half a frame on top.
+        let dec_avg = avg(&self.decode_us);
+        let pipeline = host_avg + rtt_avg / 2.0 + dec_avg;
+        eprintln!(
+            "pipeline latency: ~{pipeline:.1} ms  (host {host_avg:.1} + net {:.1} + decode {dec_avg:.2})",
+            rtt_avg / 2.0
+        );
         eprintln!("=================================================\n");
     }
 }
@@ -482,6 +507,9 @@ fn run_session(
         // Drain audio every iteration (non-blocking) so it never gates video.
         while let Some(an) = sess.poll_audio(&mut abuf) {
             apkts += 1;
+            if let Some(b) = bench.as_mut() {
+                b.audio(an);
+            }
             if let Some((path, data)) = afix.as_mut() {
                 data.extend_from_slice(&(an as u16).to_le_bytes());
                 data.extend_from_slice(&abuf[..an]);

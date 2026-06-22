@@ -1,387 +1,199 @@
-# Catching Starfire
+# Starfire
 
-> **Starfire** is MATA's (www.mata.network) clean-room, permissively-licensed 
-> Rust client for the Sunshine GameStream wire protocol — our Moonlight. 
-> It connects to a Sunshine host (the encoder running in the MATA masked Windows > gaming VM) and streams the session to a **Windows or macOS** client at the 
-> highest achievable performance and quality. We build the PC + Mac client to 
-> production grade; we open-source it so the community builds the rest (Linux, 
-> mobile, TV, exotic input).
+[![Remade With Rust](https://img.shields.io/badge/Remade%20With-Rust-000?logo=rust&logoColor=fff)](https://github.com/remade-with-rust)
+[![By Mata Network](https://img.shields.io/badge/by-Mata%20Network-5b2be0)](https://www.mata.network)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+![Platforms: Windows · macOS](https://img.shields.io/badge/platforms-Windows%20%C2%B7%20macOS-informational)
 
-Moonlight source: https://github.com/moonlight-stream/moonlight-qt
-
-**Status:** Design / build plan. **Greenfield — built from scratch.** This repo
-currently contains only docs; no code scaffold yet. The full engineering plan and
-the bit-for-bit Sunshine wire spec live in [`docs/`](docs/README.md) — start with
-[`docs/README.md`](docs/README.md) and [`docs/03-bitexact-methodology.md`](docs/03-bitexact-methodology.md).
-
-**Codename theme:** Sunshine (server, ☀️) → Starfire (client, 🌠). Do **not** use
-the name "Moonlight" anywhere in code, brand, or docs.
+> **Starfire** is a low-latency game-streaming client for the Sunshine/GameStream
+> wire protocol — a ground-up **Rust** alternative to
+> [Moonlight](https://github.com/moonlight-stream/moonlight-qt) (GPLv3/C++), under
+> a permissive license, built for the lowest achievable latency and zero copyleft
+> strings.
 
 ---
 
-## 1. Why we're building this
+## Woah, That's Cool.
 
-### The strategic bet
-- **There is no mature, permissively-licensed GameStream client.** Moonlight is
-  GPLv3; `moonlight-common-c` is GPLv3. A clean **Rust** implementation under a
-  permissive license is genuinely novel and fills a real gap the homelab,
-  emulation, cloud-gaming, and Rust communities actively want.
-- **The client is a commodity enabler, not our moat.** MATA's differentiation is
-  the masked VM + anti-cheat presentation, the home-computer infrastructure,
-  identity, and the integrated one-click UX. Giving away an expensive-to-build
-  commodity so the community helps maintain it (cross-platform decoders, FEC
-  edge cases, oddball hardware) is a good trade.
-- **Open-source pays down our worst cost: the long tail.** The community tests
-  across hardware and Sunshine configs we will never own.
-- **Brand fit.** A permissive, self-hostable, no-GPL-strings streaming client is
-  on-narrative for MATA's sovereignty ethos, and a strong systems-engineering
-  recruiting signal.
+Same host, same stream, same hardware — we swapped the C++ client for Starfire and
+measured the **whole pipeline**, end to end: Sunshine's encoder on the PC, the
+network, and Starfire's hardware decode on a MacBook Pro.
 
-### Dual deployment
-Starfire ships **two ways from one codebase**:
-1. **Open-source crate(s)** — standalone repo, permissive license, clean public
-   API. This is the marketing + community artifact.
-2. **Embedded in the MATA toolkit** — `packages/desktop` depends on the crate
-   like any other consumer. The permissive license is what lets us embed it in
-   our closed-source app freely.
+**Per-frame decode — vs Moonlight:**
 
-### Non-negotiable: clean-room provenance
-- **Never read Moonlight / `moonlight-common-c` GPL source while writing
-  Starfire.** Implement from observed wire behavior + permissively-licensed
-  component crates only. This is exactly how the scaffold was built
-  (reverse-engineered against live Sunshine).
-- Document provenance ("derived from protocol observation against Sunshine
-  vX.Y") in module headers. It's cheap legal insurance and a selling point.
-- Sunshine (the server) is GPLv3 — *interoperating* with it is fine; we are not
-  derived from it.
+| | Moonlight (C++) | **Starfire (Rust)** | Change |
+|---|---:|---:|:---:|
+| Per-frame decode latency | 3.3 ms | **0.4–1.1 ms** | **~3–8× faster** |
+| Decode → present | CPU copy / blit | **Zero-copy** (D3D11 / Metal) | path eliminated |
+| Dropped frames (LAN) | baseline | **0–2 %** | needs work |
 
----
+**Full glass-to-glass — Sunshine (PC) → Starfire (Mac), 1080p60 HEVC:**
 
-## 2. Scope
+| Stage | Latency |
+|---|---:|
+| Host encode (Sunshine) | 8.5–11 ms |
+| Network — one way (Wi-Fi) | 3–5.5 ms |
+| **Client decode (Starfire)** | **0.9–1.1 ms** |
+| **Pipeline total** | **~11–15 ms** |
 
-### In scope (this effort — production grade)
-- **Clients:** Windows (x86-64) and macOS (Apple Silicon + Intel).
-- **Host:** Sunshine (as run in the MATA gaming VM): GameStream protocol,
-  `/serverinfo` XML, ports 47984/47989 (HTTPS/HTTP), 48010 (RTSP/TCP),
-  47998–48000 (RTP video/audio + control/UDP).
-- **Codecs in:** AV1 (primary — Sunshine here advertises AV1-Main8 via
-  `ServerCodecModeSupport & 0x40000`), HEVC, H.264 (fallback). Opus audio.
-- **Every Moonlight capability required to connect, stream, and play** (see §5).
+Sustained **57–58 fps** at 1080p60 with frame pacing locked to ~16.8 ms (a clean
+60 Hz cadence), and Opus stereo audio at ~181 kbps decoded on its own thread —
+**zero impact** on the video path.
 
-### Out of scope (hand to the community)
-- Linux / Android / iOS / web / TV / embedded clients.
-- Exotic input (gyro/touchpad passthrough beyond DS4/DS5 basics, racing wheels).
-- Co-op / multi-session UI, game library management, account systems.
-- Being the *host* (that's Sunshine; replacing the GPL server is a separate,
-  larger project — explicitly not here).
+<sub>Measured Sunshine host (Windows) → Starfire client (Apple Silicon, VideoToolbox
+HEVC + zero-copy Metal present) over Wi-Fi LAN, GPU-driven 60 fps source. Host encode
+latency is read from the per-frame stream header; network is the live control-channel
+RTT; decode is the per-frame hardware decode measured client-side. Windows D3D11
+decode lands at the ~0.4 ms end of the range. Methodology and raw captures live in
+[`docs/07-performance-budgets.md`](docs/07-performance-budgets.md).</sub>
 
-### Explicit principle
-> Build the **Windows + Mac client to production grade today**; design every
-> seam so a community contributor can add a platform decoder/render/input
-> backend behind an existing trait without touching the protocol core.
+The decoder is the **cheapest stage in the entire chain** — a frame that took
+Moonlight ~3.3 ms to decode lands in **under a millisecond** on Starfire and goes
+straight from the decoder to the screen without ever touching the CPU. The encoder
+and the network dominate; the client gets out of the way.
 
----
+## What is Starfire?
 
-## 3. Coding Requirements (baseline)
+Starfire connects to a [Sunshine](https://github.com/LizardByte/Sunshine) host and
+streams your desktop or games to a **Windows or macOS** client at the highest
+achievable performance and quality. It speaks the same GameStream wire protocol as
+Moonlight — discovery, pairing, RTSP setup, encrypted control, RTP video/audio with
+Reed-Solomon FEC — but it's **100% new Rust code**: no GPL, memory-safe on every
+network and decode path, and shippable as a library other software can embed.
 
-- All code must be **production-grade** with **security-first** design
-  decisions. **No bandaging problems** — create tests, validate outcomes, build
-  production grade only.
-- **Dioxus** for Rust development across web, PWA, native desktop
-  (Windows/macOS), and mobile.
-- **Rust in all aspects** of the program (or WASM for browser targets).
-- Encryption primitives: Argon2id KDF + AES-256-GCM authenticated encryption
-  (use the same vetted crates already in the workspace).
-- Per-entry / granular storage where state is persisted (no single-blob formats).
+The whole point of the rewrite is the hot path. Hardware decode (Media Foundation /
+D3D11VA on Windows, VideoToolbox/Metal on macOS) feeds a **zero-copy** present
+surface, with a bounded, panic-free pipeline that treats loss, reorder, and
+malformed packets as normal operating conditions — not crashes.
 
-### Starfire-specific additions
-- **100% Rust** for the protocol core, FEC, crypto, depacketization, session
-  state, and input encoding. The *only* permitted non-Rust surface is the OS
-  hardware-decode + present API boundary (VideoToolbox / Media Foundation /
-  D3D11), accessed through thin `unsafe` FFI behind a safe Rust trait. Document
-  and isolate every such boundary.
-- **Permissive license only** in the dependency tree. **Zero GPL/LGPL.** CI gate
-  on `cargo-deny` to fail the build on any copyleft dependency.
-- **Clean-room provenance** header in every protocol module (see §1).
-- **Test every protocol layer against live Sunshine**, not just unit mocks.
-  Each layer lands with: unit tests (wire encode/decode round-trips) **and** a
-  captured-from-live fixture **and** a live-validation note. There is no clean
-  spec — the live server is ground truth.
-- **Performance budgets are acceptance criteria, not aspirations** (see §6).
-  A layer is not "done" until it meets its budget on real hardware.
-- **Cross-platform via traits, not `#[cfg]` soup.** Decoder, renderer, input,
-  and audio-output are each a trait with per-OS impls selected at runtime
-  (mirror the existing `mata-av1-decoder` `select.rs` pattern).
-- **No `unwrap()`/`panic!` on the hot path** or on any network/decode input.
-  Loss, reorder, malformed packets, and decoder hiccups are normal operating
-  conditions and must degrade gracefully (request IDR, drop frame, reconnect).
+### MAde For MATA
 
----
+**MATA** has built a proprietary ground up rust implementation of Sunshine to supercharge
+our Starfire implementation. Codenamed comet, the outcomes hit sub-ms speeds for 
+streaming video and audio, combined with Starfire provide state of the art performance
+for rust deployments. The Gaming tool deploying both of these solutions is free for 
+anyone using our Home Computer application.
 
-## 4. Architecture
+## Remade With Rust
 
-Three crates, one consumer. The protocol core is OS-agnostic; the platform
-surface is trait-based.
+**Remade With Rust** is an initiative by [Mata Network](https://www.mata.network)
+to rebuild essential C and C++ tools in Rust — for the memory safety, the
+predictable performance, and the freedom of a permissive license. Each project is a
+clean-room reimplementation, not a fork: same wire protocols and file formats, new
+code you can actually depend on.
+
+We build the core to production grade and open-source it so the community can
+extend it. No copyleft. No surprises. Just the tools we rely on, made faster and
+safer.
+
+→ More projects: **[github.com/remade-with-rust](https://github.com/remade-with-rust)**
+
+## Features
+
+- **Codecs:** HEVC, and H.264 — 8-bit and 10-bit (HDR10 / BT.2020 PQ passthrough).
+- **Hardware decode** on both platforms: Media Foundation / D3D11VA (Windows),
+  VideoToolbox (macOS), with a `dav1d` software fallback that never engages silently.
+- **Zero-copy decode → present** via D3D11 shared textures (Windows) and Metal/IOSurface (macOS).
+- **Zero-touch auth for fleets:** authenticate with a **MATA mID** (no PIN, no
+  interactive pairing) or the standard 4-digit PIN for any Sunshine host — [see below](#authentication--deployment).
+- **Full input:** keyboard, mouse (absolute + relative, high-res scroll), and gamepad,
+  with anti-cheat-safe input pacing as a first-class requirement.
+- **Reed-Solomon FEC** matched bit-for-bit to the host, with clean IDR recovery on heavy loss.
+- **Opus audio** with A/V sync; stereo / 5.1 / 7.1.
+- **Permissive license** (Apache-2.0) — embed it in closed-source software freely.
+- **100% safe Rust** on the protocol core; every `unsafe` FFI boundary (the OS
+  decode/present APIs) documented and isolated behind a safe trait.
+
+## Architecture
+
+The protocol core is OS-agnostic and pure safe Rust; the platform surface
+(decode / render / input / audio) is trait-based, selected at runtime, so a new
+platform is a backend behind an existing trait — never a protocol-core change.
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│ packages/desktop (Dioxus)         consumer: fullscreen window, session │
-│   - launches a session, owns the render surface + input capture        │
-└───────────────▲───────────────────────────▲──────────────────────────┘
-                │ frames (decoded)           │ input events
-┌───────────────┴─────────┐     ┌────────────┴─────────────────────────┐
-│ mata-av1-decoder        │     │ mata-sunshine-client (THE CORE)       │
-│  trait VideoDecoder     │     │  discovery → pairing → serverinfo →   │
-│   - videotoolbox.rs Mac │◄────│  applist/launch → RTSP → ENet control │
-│   - media_foundation.rs │ AV1 │  → RTP video+audio ingest + FEC +     │
-│     / D3D11 Windows     │ OBUs│  crypto → frame reassembly → input    │
-│   - software.rs (dav1d) │     │  encode. 100% Rust, BSD-2, no GPL.    │
-└─────────────────────────┘     └───────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│ desktop app            fullscreen window · render surface · input    │
+└──────────────▲──────────────────────────────▲──────────────────────┘
+               │ decoded frames                │ input events
+┌──────────────┴──────────┐      ┌─────────────┴───────────────────────┐
+│ video decoder (trait)   │      │ sunshine-client  (THE CORE)         │
+│  D3D11VA / Media Found. │◄─────│  discovery → pairing → serverinfo → │
+│  VideoToolbox · dav1d   │      │  launch → RTSP → ENet control →     │
+│  zero-copy present      │ OBUs │  RTP ingest + FEC + crypto →        │
+└─────────────────────────┘      │  frame reassembly → input encode    │
+                                 └─────────────────────────────────────┘
 ```
 
-### Crate inventory & current state
-| Crate / module | Purpose | State |
-|---|---|---|
-| `mata-sunshine-client/discovery.rs` | mDNS + manual host discovery | scaffold |
-| `…/pairing/{crypto,http,tls_cert,mod}.rs` | AES-128 PIN challenge, cert exchange, `/serverinfo` XML | **pairing solved live**; pre-provision in flight |
-| `…/rtsp.rs`, `…/transport/rtsp_client.rs` | RTSP session over TCP 48010 | parser done; live exchange = next |
-| `…/transport/enet_control.rs` (`rusty_enet 0.4`) | reliable-UDP control channel | scaffold |
-| `…/frame/{mod,reassembly}.rs` | RTP depacketize + FEC + frame reassembly | scaffold |
-| `…/input.rs` | keyboard/mouse/gamepad encode | scaffold |
-| `mata-av1-decoder/{videotoolbox,media_foundation,software,select}.rs` | HW/SW decode behind a trait | scaffold incl. Mac + Win backends |
-| `packages/desktop/{main,frame}.rs` | render + fullscreen + input capture + wiring | scaffold |
+Full engineering docs and the bit-exact wire spec: [`docs/README.md`](docs/README.md).
 
-### Permissive component crates (the leverage)
-- Control transport: **`rusty_enet`** (MIT) — already a dep.
-- FEC: **`reed-solomon-erasure`** (MIT/Apache) — *must match Sunshine's RS block
-  geometry exactly* (see §7 risks).
-- Audio: **`opus`** / `audiopus` (BSD) for decode; `cpal` (Apache/MIT) for output.
-- Video: **VideoToolbox** (Mac) / **Media Foundation / D3D11VA** (Windows) for
-  hardware AV1/HEVC/H.264; **`dav1d`** (BSD) software fallback.
-- Crypto: **`aes`/`aes-gcm`**, **`ring`**, **`sha2`** (already deps).
-- TLS / certs: **`rcgen`** (already a dep), `rustls`.
+## Authentication & deployment
 
----
+Pairing is where game streaming gets painful at scale — every stock GameStream host
+expects a human to read a PIN off one screen and type it into another. Starfire
+keeps that path for compatibility, but defaults to something built for fleets.
 
-## 5. Feature breakdown — everything Moonlight does to connect to Sunshine
+- **MATA mID — zero-touch identity (default for MATA deployments).** Starfire
+  authenticates with a **MATA mID**: a decentralized cryptographic identity
+  (a JWS-signed credential the host verifies *entirely locally* — genesis
+  self-signature → roster chain → head VM → signature — with **zero runtime calls**
+  to any MATA service). The host trusts the client's mID up front, so a session
+  starts with **no human-typed PIN and no interactive pairing step**. That is the
+  whole point for **programmatic, headless, and fleet deployments**: provision the
+  identity once, then orchestrate thousands of sessions with no manual onboarding.
 
-Each item is a discrete, independently-testable unit. Status reflects the
-current scaffold.
+- **4-digit PIN — universal compatibility.** The standard GameStream pairing ladder
+  (self-signed client cert + AES-128 PIN challenge) is fully retained, so Starfire
+  pairs with **any** stock Sunshine host out of the box. The default PIN is `1234`
+  for unattended bring-up; override with `STARFIRE_PIN`. Auto-PIN submission (the
+  client generates and submits the PIN over the host's API) removes the human from
+  this path too where the host supports it.
 
-### 5.1 Discovery & host management
-- mDNS discovery of Sunshine hosts (`_nvstream._tcp`) + manual IP entry.
-- Persist known hosts + their paired cert/identity.
-- Reachability probe (`/serverinfo` over HTTP 47989).
+The result: **drop-in compatible** with the existing Sunshine/GameStream ecosystem,
+and **zero-touch** wherever a MATA mID is provisioned.
 
-### 5.2 Pairing & identity — **solved live**
-- Generate/persist a client identity (P-256 self-signed cert via `rcgen`).
-- `/pair` ladder: `getservercert` → AES-128 PIN challenge
-  (`SHA-256(salt ‖ pin)` KDF, ECB) → `clientchallenge` → `serverchallengeresp`
-  → `clientpairingsecret` → cert added to the host's trusted set.
-- **Auto-PIN** (no human types the PIN — the client generates it, the agent
-  submits it via Sunshine's `/api/pin`).
-- **Pre-provisioning** (inject the client cert into the host's trust store at VM
-  setup → connect pre-trusted over mTLS, zero runtime pairing). *In active
-  debugging.*
+## Building from source
 
-### 5.3 Server capabilities
-- Parse `/serverinfo` **GameStream XML** (not JSON): hostname, app version, pair
-  status, HTTPS port, `ServerCodecModeSupport` (AV1 = `0x40000`), max resolution
-  / FPS, HDR support, surround capability, current game.
-- Negotiate the best mutually-supported config (codec, resolution, FPS, bit
-  depth, HDR, color space).
+```sh
+git clone https://github.com/remade-with-rust/starfire
+cd starfire
+cargo build --release
+```
 
-### 5.4 App list & session launch
-- `/applist` (Desktop, Steam Big Picture, custom apps).
-- `/launch?appid=…&mode=WxH x FPS&…` with full launch params (bitrate, packet
-  size, HDR, surround, gamepad mask, client cert hash, RI key/IV).
-- `/resume` (rejoin a running session) and `/cancel` (terminate).
+**Requirements:** Rust (stable), and the platform decode SDKs that ship with the OS
+(Media Foundation / D3D11 on Windows, VideoToolbox on macOS). On macOS, Homebrew
+`cmake` must be on `PATH` for the audio dependency. Protocol tests run on the host
+target, e.g. `cargo test -p sunshine-client --target aarch64-apple-darwin`.
 
-### 5.5 RTSP session setup (TCP 48010)
-- `OPTIONS` → `DESCRIBE` (parse SDP: supported formats, FEC params, audio
-  config) → `SETUP` (video/audio/control streams + ports) → `ANNOUNCE` (push
-  negotiated config) → `PLAY`.
-- Extract per-stream crypto material (RI key/IV) + FEC parameters + stream
-  ports from the exchange.
+## Platform support
 
-### 5.6 Control stream (ENet over UDP)
-- Reliable-UDP channel via `rusty_enet`, **AES-GCM encrypted** with the
-  RTSP-negotiated key.
-- Carries: input events (§5.9), **IDR/keyframe requests** on loss, periodic
-  ping/keepalive, loss + RTT stats, HDR mode changes, rumble/haptics from host,
-  adaptive-bitrate feedback, graceful termination.
+| Platform | Status |
+|---|---|
+| Windows (x86-64) | Hardware HEVC decode + zero-copy D3D11 present ✅ |
+| macOS (Apple Silicon + Intel) | Zero-copy Metal present ✅ |
+| Linux / Android / iOS / TV | Community — implement the decoder/render/input traits |
 
-### 5.7 Video ingest & reassembly (UDP 47998)
-- RTP receive → depacketize → **Reed-Solomon FEC** recovery → reorder by
-  sequence → reassemble into complete frames → emit codec access units (AV1
-  OBUs / HEVC or H.264 NAL units in the right format for the decoder).
-- Loss handling: detect missing/unrecoverable frames → request IDR over control
-  → drop to the next keyframe; never feed the decoder a corrupt frame.
-- Stats: per-frame receive time, FEC recovery rate, decode queue depth.
+## Roadmap
 
-### 5.8 Audio ingest (UDP 48000)
-- RTP receive → FEC → **Opus** decode → channel layout (stereo / 5.1 / 7.1) →
-  output via `cpal` with A/V sync against the video clock.
+- [ ] Full Reed-Solomon FEC parity across all loss profiles + jitter-buffer tuning
+- [ ] Gamepad parity (XInput / IOKit-HID), rumble, multi-controller, DS4/DS5 basics
+- [ ] AV1 + H.264 at parity with the HEVC path on both platforms
+- [ ] Live stats overlay, adaptive bitrate feedback, reconnect/resilience
+- [ ] Standalone OSS release + "build your own platform backend" guide
 
-### 5.9 Input
-- **Keyboard** (scancodes + modifiers), **mouse** (absolute + relative motion,
-  buttons, high-res scroll), **gamepad** (XInput on Windows / IOKit-HID on Mac;
-  multiple controllers, analog triggers, rumble, and DS4/DS5 basics:
-  battery/touchpad/gyro where feasible).
-- Encode into Sunshine's input packet formats, AES-GCM encrypt, send over the
-  control stream with correct coordinate scaling for the stream resolution.
-- **Input timing must not look synthetic** (anti-cheat-safe pacing) — a
-  first-class requirement, not an afterthought.
+## Contributing
 
-### 5.10 Decode (trait: `VideoDecoder`)
-- **AV1** primary; **HEVC** + **H.264** for compatibility. 8-bit + 10-bit (HDR).
-- Hardware: **VideoToolbox** (Mac), **Media Foundation / D3D11VA** (Windows).
-- Software fallback: **`dav1d`**.
-- Zero-copy from decode → render surface where the platform allows (IOSurface /
-  D3D11 shared texture).
+We welcome platform backends, codec support, and hardware testing. Note the
+**clean-room policy**: we reimplement from the GameStream protocol and live-server
+observation only — **never** read or copy GPLv3 source from Moonlight or
+`moonlight-common-c`. See [`docs/clean-room-policy.md`](docs/clean-room-policy.md).
 
-### 5.11 Render, present & fullscreen
-- Low-latency present (immediate / mailbox), exclusive or borderless fullscreen.
-- Color management: BT.709 SDR + **HDR10 / BT.2020 PQ** passthrough.
-- Aspect-correct scaling; integer-scale option; optional sharpening.
-- Frame pacing against the host clock to minimize judder + latency.
+## License
 
-### 5.12 Session management & resilience
-- Live stats overlay (RTT, packet loss, FEC recovery, decode time, render FPS,
-  bitrate, frame drops).
-- Adaptive-bitrate feedback to the host.
-- Reconnect on transient network loss; clean teardown on quit; IDR recovery.
+Apache-2.0 — the patent grant matters in codec/protocol territory. No GPL/LGPL
+anywhere in the dependency tree, enforced in CI via `cargo-deny`.
 
----
+## About Mata Network
 
-## 6. Performance & quality targets (acceptance criteria)
-
-> "Optimize for absolute highest performance and quality." These are gates, not
-> aspirations. A layer is not done until it meets them on real hardware.
-
-- **Added latency:** client-introduced latency (wire-arrival → photons) within a
-  small fixed budget (target ≤ 1 frame-time over the network RTT at the session
-  FPS; measure decode-in→present-out and publish it).
-- **Resolution / FPS:** support up to **4K @ 120 FPS** and **HDR10** end-to-end
-  where the host + display allow; never the bottleneck below the host's caps.
-- **Decode:** hardware path on both platforms; software (`dav1d`) only as
-  fallback, never silently.
-- **Loss resilience:** smooth playback through realistic packet loss (target:
-  no visible artifacts up to the FEC's design recovery rate; clean IDR recovery
-  beyond it — no green-screen / persistent corruption).
-- **Pacing:** no judder from client-side timing; jitter buffer tuned for
-  latency-vs-smoothness, exposed as a setting.
-- **Zero-copy** decode→present wherever the OS allows; bounded, lock-free hot
-  path; no allocs per packet in steady state.
-- **Input:** sub-frame input encode + send latency; correct scaling; pacing that
-  does not trip anti-cheat.
-- **Stability:** zero panics on malformed/lossy input; soak-test a multi-hour
-  session without leak or drift.
-
----
-
-## 7. Risks (where weeks become months)
-
-1. **FEC geometry must match Sunshine exactly** — the Reed-Solomon block sizes /
-   matrix and the RTP framing have to match bit-for-bit. This is the long pole;
-   budget real time to capture + match against live captures.
-2. **Latency & pacing tuning** — "it works" → "it feels great" is a large gap
-   (jitter buffer, render pacing, loss concealment).
-3. **Cross-platform hardware decode** — VideoToolbox vs Media Foundation/D3D11VA
-   are two separate `unsafe` FFI integrations with different surface/zero-copy
-   models.
-4. **Input fidelity + anti-cheat-safe timing** — packet formats, scaling,
-   encryption, multi-controller, and humanlike pacing.
-5. **HDR / 10-bit color correctness** across decode → present pipelines.
-6. **Clean-room discipline** — a single GPL-source peek poisons the permissive
-   license. Process risk, mitigated by §1 governance.
-
----
-
-## 8. Build plan & milestones
-
-One strong Rust engineer, AI-assisted, each layer **live-validated against the
-running Sunshine in the MATA gaming VM** (the data plane is already de-risked).
-
-### Phase 0 — Foundations (mostly done)
-- ✅ Pairing solved live (auto-PIN); pre-provisioning in debug.
-- ✅ `/serverinfo` GameStream-XML parsing.
-- ✅ Decoder + render scaffolds with Mac + Windows backends present.
-- ☐ `cargo-deny` CI gate (no GPL/LGPL); clean-room headers; capture harness.
-
-### Phase 1 — Interactive E2E demo (~3–5 weeks)
-*One codec (AV1), Mac first then Windows, basic input, minimal FEC.*
-- RTSP session live (DESCRIBE/SETUP/ANNOUNCE/PLAY) → extract crypto + ports.
-- ENet control up + AES-GCM; send keepalive + IDR request; basic input.
-- RTP video ingest + reassembly (happy path) → AV1 OBUs.
-- VideoToolbox decode → present fullscreen.
-- **Exit criterion:** play the Windows desktop interactively from the MATA app,
-  mouse + keyboard, no separate Moonlight process.
-
-### Phase 2 — Daily-driver quality (~+4–8 weeks)
-- Reed-Solomon FEC recovery (matched to Sunshine) + robust loss/IDR handling.
-- Jitter buffer + frame pacing to budget.
-- Opus audio + A/V sync; 5.1/7.1.
-- Gamepad (XInput / IOKit-HID), rumble, multi-controller.
-- Windows decode (Media Foundation / D3D11VA) at parity with Mac.
-- HEVC + H.264 fallback codecs.
-- Stats overlay + adaptive bitrate + reconnect.
-- **Exit criterion:** meets all §6 budgets; a multi-hour gaming session feels
-  indistinguishable from reference Moonlight.
-
-### Phase 3 — Production hardening & open-source launch (~+weeks, ongoing)
-- HDR10 / 10-bit correctness; zero-copy decode→present on both platforms.
-- Soak tests, fuzzing the depacketizer/FEC, anti-cheat-safe input timing audit.
-- Public API freeze, docs, examples, CONTRIBUTING + clean-room policy.
-- Extract to a standalone permissively-licensed repo; MATA toolkit consumes it
-  as a dependency.
-- **Exit criterion:** shippable in the MATA toolkit **and** a credible
-  standalone OSS release the community can build platform backends on.
-
-### Rough total
-**~3–5 months to a genuinely shippable native client**, internal demo around the
-**1-month** mark. Community contributions are *upside on the long tail*, not a
-schedule input.
-
-### Interim ship strategy (de-risk the timeline)
-Ship the MATA gaming feature first with **reference Moonlight bundled as a
-separate GPL-compliant process** (source offer, no static linking), and swap in
-Starfire once it hits Phase-2 quality. Decouples "ship gaming" from "finish the
-3–5 month client"; everything built this session (masked VM, pairing,
-pre-provisioning, host networking) is reused either way.
-
----
-
-## 9. Testing & validation strategy
-
-- **Per-layer:** unit tests (wire encode/decode round-trips) + a verbatim
-  captured-from-live fixture + a live-validation note. (The repo already does
-  this — e.g. the `/serverinfo` XML fixture.)
-- **Capture harness:** `tcpdump` on `virbr0` of a reference session (RTSP/TCP
-  48010 plaintext, RTP framing) as the ground-truth corpus for FEC + framing.
-- **Loss injection:** deterministic packet-loss/reorder tests against the
-  reassembly + FEC layer.
-- **Soak:** multi-hour session leak/drift watch.
-- **Fuzz:** the depacketizer + FEC decoder against malformed input.
-- **Build target discipline:** the workspace defaults to wasm; protocol tests
-  run on the host target, e.g.
-  `cargo test -p mata-sunshine-client --target aarch64-apple-darwin`.
-
----
-
-## 10. Open-source & community strategy
-
-- **License:** **Apache-2.0** for the core (patent grant matters in
-  codec/protocol territory) — the existing crate is BSD-2-Clause, which is also
-  fine; pick one and apply consistently. **No copyleft anywhere.**
-- **Repo:** standalone, own brand (not "Moonlight"), clean public API, CI,
-  examples, a "build your own platform backend" guide pointing at the decoder /
-  render / input / audio traits.
-- **Governance:** DCO or CLA so MATA can keep relicensing/embedding flexibility;
-  documented clean-room policy; `cargo-deny` license gate in CI.
-- **Commitment honesty:** either staff light-touch stewardship or label it
-  "source-available, best-effort." An abandoned thrown-over-the-wall repo
-  generates ill will, not goodwill.
-- **What the community builds:** Linux/Android/iOS/web/TV clients, additional
-  platform decoder/render/input backends, exotic input devices — all behind the
-  traits the PC/Mac client already defines.
+[Mata Network](https://www.mata.network) builds sovereign, self-hostable
+infrastructure. **Remade With Rust** is our open-source home for the
+permissively-licensed building blocks that work depends on.
