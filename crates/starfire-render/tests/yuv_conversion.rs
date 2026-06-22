@@ -49,6 +49,8 @@ fn solid_nv12(w: u32, h: u32, y: u8, u: u8, v: u8) -> VideoFrame {
             Plane::new(vec![y; (w * h) as usize], w as usize),
             Plane::new(cbcr, cw * 2),
         ],
+        #[cfg(target_os = "macos")]
+        native: None,
     }
 }
 
@@ -67,6 +69,8 @@ fn solid_i420(w: u32, h: u32, y: u8, u: u8, v: u8) -> VideoFrame {
             Plane::new(vec![u; cw * ch], cw),
             Plane::new(vec![v; cw * ch], cw),
         ],
+        #[cfg(target_os = "macos")]
+        native: None,
     }
 }
 
@@ -206,6 +210,8 @@ fn handles_padded_stride() {
         color_space: ColorSpace::Bt709Limited,
         pts: 0,
         planes: vec![Plane::new(y_plane, y_stride), Plane::new(c_plane, c_stride)],
+        #[cfg(target_os = "macos")]
+        native: None,
     };
 
     let got = render_center(&device, &queue, &pipeline, &frame);

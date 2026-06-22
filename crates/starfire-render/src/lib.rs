@@ -21,6 +21,10 @@ use starfire_decode::VideoFrame;
 
 pub mod gpu;
 
+/// macOS zero-copy Metal present backend (selected by [`new_for_window`]).
+#[cfg(target_os = "macos")]
+pub mod metal;
+
 #[derive(Debug, thiserror::Error)]
 pub enum RenderError {
     #[error("no renderer backend available for this platform yet")]
@@ -172,4 +176,64 @@ impl Renderer for VideoRenderer {
         surface_tex.present();
         Ok(())
     }
+}
+
+/// The active renderer for this platform/session. On macOS the zero-copy Metal
+/// backend is selected by default (override with `STARFIRE_RENDER=wgpu`);
+/// everywhere else this is always the `wgpu` [`VideoRenderer`].
+pub enum ActiveRenderer {
+    Wgpu(VideoRenderer),
+    #[cfg(target_os = "macos")]
+    Metal(metal::MetalRenderer),
+}
+
+impl ActiveRenderer {
+    /// Reconfigure for a new surface size (physical pixels).
+    pub fn resize(&mut self, width: u32, height: u32) {
+        match self {
+            ActiveRenderer::Wgpu(r) => r.resize(width, height),
+            #[cfg(target_os = "macos")]
+            ActiveRenderer::Metal(r) => r.resize(width, height),
+        }
+    }
+}
+
+impl Renderer for ActiveRenderer {
+    fn set_color_mode(&mut self, mode: ColorMode) {
+        match self {
+            ActiveRenderer::Wgpu(r) => r.set_color_mode(mode),
+            #[cfg(target_os = "macos")]
+            ActiveRenderer::Metal(r) => r.set_color_mode(mode),
+        }
+    }
+    fn present(&mut self, frame: &VideoFrame) -> Result<(), RenderError> {
+        match self {
+            ActiveRenderer::Wgpu(r) => r.present(frame),
+            #[cfg(target_os = "macos")]
+            ActiveRenderer::Metal(r) => r.present(frame),
+        }
+    }
+}
+
+/// Build the renderer for `window`. On macOS, the zero-copy Metal backend unless
+/// `STARFIRE_RENDER=wgpu`; `STARFIRE_VSYNC=0` makes the Metal path present
+/// immediately (lowest latency). Non-macOS always returns the `wgpu` backend, so
+/// that path is unchanged.
+pub fn new_for_window<W>(window: W, width: u32, height: u32) -> Result<ActiveRenderer, RenderError>
+where
+    W: wgpu::WindowHandle + 'static,
+{
+    #[cfg(target_os = "macos")]
+    {
+        let force_wgpu = std::env::var("STARFIRE_RENDER").ok().as_deref() == Some("wgpu");
+        if !force_wgpu {
+            let vsync = !matches!(
+                std::env::var("STARFIRE_VSYNC").ok().as_deref(),
+                Some("0") | Some("false") | Some("off") | Some("no")
+            );
+            return metal::MetalRenderer::new(&window, width, height, vsync)
+                .map(ActiveRenderer::Metal);
+        }
+    }
+    VideoRenderer::new(window, width, height).map(ActiveRenderer::Wgpu)
 }

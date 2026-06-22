@@ -61,12 +61,77 @@ impl Plane {
     }
 }
 
+/// macOS zero-copy seam: a retained, IOSurface-backed `CVPixelBuffer` handed up
+/// from the VideoToolbox backend so the Metal renderer can sample it directly
+/// (no plane memcpy, no GPU re-upload). Lives behind the same [`Decoder`] trait;
+/// when present, the frame's `planes` are intentionally empty.
+///
+/// Clean-room: a thin retain/release wrapper over Apple's CoreFoundation
+/// refcounting — no third-party binding crate.
+///
+/// [`Decoder`]: crate::Decoder
+#[cfg(target_os = "macos")]
+pub mod native {
+    use std::ffi::c_void;
+
+    /// `CVPixelBufferRef` (an opaque CoreVideo image buffer).
+    pub type CVPixelBufferRef = *const c_void;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFRetain(cf: *const c_void) -> *const c_void;
+        fn CFRelease(cf: *const c_void);
+    }
+
+    /// Owns exactly one `+1` retain on a `CVPixelBuffer` for its lifetime;
+    /// `CFRelease`s on `Drop`.
+    #[derive(Debug)]
+    pub struct NativeSurface {
+        pb: CVPixelBufferRef,
+    }
+
+    impl NativeSurface {
+        /// Take a `+1` retain on a live pixel buffer.
+        ///
+        /// # Safety
+        /// `pb` must be a valid, live `CVPixelBufferRef`.
+        pub unsafe fn retain(pb: CVPixelBufferRef) -> Self {
+            let _ = CFRetain(pb);
+            Self { pb }
+        }
+
+        /// The underlying `CVPixelBufferRef` (still owned by `self`).
+        pub fn as_ptr(&self) -> CVPixelBufferRef {
+            self.pb
+        }
+    }
+
+    impl Drop for NativeSurface {
+        fn drop(&mut self) {
+            // SAFETY: balances the `+1` taken in `retain`.
+            unsafe { CFRelease(self.pb) }
+        }
+    }
+
+    // CoreFoundation refcounting is atomic and the decoded surface is immutable;
+    // we only retain on the VideoToolbox thread and sample on the main thread.
+    unsafe impl Send for NativeSurface {}
+}
+
 /// A decoded frame in CPU memory, ready for the renderer to upload as textures.
 ///
 /// Invariants (checked by [`VideoFrame::validate`]):
 /// - `Nv12` ⇒ exactly 2 planes (Y, CbCr); `I420` ⇒ exactly 3 (Y, Cb, Cr).
 /// - Each plane buffer is at least `stride * plane_rows` bytes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// On macOS a zero-copy frame instead carries a [`native::NativeSurface`] and
+/// leaves `planes` empty (see the `native` field); `validate` accepts that.
+///
+/// `Clone`/`PartialEq`/`Eq` are derived everywhere except macOS, where the
+/// retained native handle is neither cloneable nor comparable. No consumer
+/// clones or compares a `VideoFrame`, so this is invisible to callers.
+#[cfg_attr(not(target_os = "macos"), derive(Clone, PartialEq, Eq))]
+#[derive(Debug)]
 pub struct VideoFrame {
     /// Visible width in luma samples.
     pub width: u32,
@@ -77,8 +142,13 @@ pub struct VideoFrame {
     /// Presentation timestamp. Unit is whatever the producer chose (we treat it
     /// opaquely for pacing); typically microseconds or 90 kHz ticks.
     pub pts: i64,
-    /// 2 planes for NV12, 3 for I420. See [`PixelFormat`].
+    /// 2 planes for NV12, 3 for I420. See [`PixelFormat`]. **Empty** when this is
+    /// a macOS zero-copy frame (the pixels live in `native`).
     pub planes: Vec<Plane>,
+    /// macOS only: a retained `CVPixelBuffer` for zero-copy Metal present. `Some`
+    /// ⇒ `planes` is empty and the renderer samples the surface directly.
+    #[cfg(target_os = "macos")]
+    pub native: Option<native::NativeSurface>,
 }
 
 impl VideoFrame {
@@ -125,6 +195,12 @@ impl VideoFrame {
     /// Validate plane count and buffer sizes. Returns a human-readable error so
     /// backends can surface a `DecodeError::Failed` instead of panicking.
     pub fn validate(&self) -> Result<(), String> {
+        // Zero-copy macOS frames carry no CPU planes — the pixels are in the
+        // retained native surface, which the Metal renderer samples directly.
+        #[cfg(target_os = "macos")]
+        if self.native.is_some() {
+            return Ok(());
+        }
         let expected = Self::plane_count(self.format);
         if self.planes.len() != expected {
             return Err(format!(
@@ -173,6 +249,8 @@ mod tests {
                 Plane::new(vec![16; (w * h) as usize], w as usize),
                 Plane::new(vec![128; cw * 2 * ch], cw * 2),
             ],
+            #[cfg(target_os = "macos")]
+            native: None,
         }
     }
 
@@ -208,6 +286,8 @@ mod tests {
                 Plane::new(vec![128; 4], 2),
                 Plane::new(vec![128; 4], 2),
             ],
+            #[cfg(target_os = "macos")]
+            native: None,
         };
         assert_eq!(f.plane_rows(1), 2);
         assert_eq!(f.plane_sample_width(1), 2);

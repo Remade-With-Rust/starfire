@@ -129,9 +129,97 @@ type VTDecompressionOutputCallback = unsafe extern "C" fn(
     presentationDuration: CMTime,
 );
 
+type CFStringRef = *const c_void;
+type CFNumberRef = *const c_void;
+type CFBooleanRef = *const c_void;
+
+/// Opaque stand-in for `CFDictionaryKeyCallBacks` / `...ValueCallBacks`. We only
+/// ever take the symbol's *address* (never dereference it in Rust), so a
+/// zero-sized type is sufficient and avoids transcribing the full struct.
+#[repr(C)]
+struct CFCallBacks {
+    _private: [u8; 0],
+}
+
+/// `kCFNumberSInt32Type`.
+const kCFNumberSInt32Type: c_int = 3;
+
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
     fn CFRelease(cf: CFTypeRef);
+    static kCFBooleanTrue: CFBooleanRef;
+    static kCFTypeDictionaryKeyCallBacks: CFCallBacks;
+    static kCFTypeDictionaryValueCallBacks: CFCallBacks;
+    fn CFDictionaryCreate(
+        allocator: CFAllocatorRef,
+        keys: *const *const c_void,
+        values: *const *const c_void,
+        numValues: isize,
+        keyCallBacks: *const c_void,
+        valueCallBacks: *const c_void,
+    ) -> CFDictionaryRef;
+    fn CFNumberCreate(
+        allocator: CFAllocatorRef,
+        theType: c_int,
+        valuePtr: *const c_void,
+    ) -> CFNumberRef;
+}
+
+#[link(name = "CoreVideo", kind = "framework")]
+extern "C" {
+    static kCVPixelBufferMetalCompatibilityKey: CFStringRef;
+    static kCVPixelBufferIOSurfacePropertiesKey: CFStringRef;
+    static kCVPixelBufferPixelFormatTypeKey: CFStringRef;
+}
+
+/// Build `destinationImageBufferAttributes` requesting an IOSurface-backed,
+/// Metal-compatible NV12 (`420v`) surface — the prerequisite for zero-copy
+/// `CVMetalTextureCache` import in the renderer. Caller owns the returned dict
+/// and must `CFRelease` it. Inert for the CPU-copy path (the surface is still a
+/// lockable NV12 buffer).
+unsafe fn make_dest_attrs() -> CFDictionaryRef {
+    let key_cb = &kCFTypeDictionaryKeyCallBacks as *const CFCallBacks as *const c_void;
+    let val_cb = &kCFTypeDictionaryValueCallBacks as *const CFCallBacks as *const c_void;
+
+    // Empty IOSurfaceProperties dict — its mere presence requests IOSurface backing.
+    let io_props = CFDictionaryCreate(
+        kCFAllocatorDefault,
+        ptr::null(),
+        ptr::null(),
+        0,
+        key_cb,
+        val_cb,
+    );
+    // Pin the output pixel format to 420v (biplanar NV12, video range).
+    let fmt: u32 = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+    let fmt_num = CFNumberCreate(
+        kCFAllocatorDefault,
+        kCFNumberSInt32Type,
+        &fmt as *const u32 as *const c_void,
+    );
+
+    let keys: [CFStringRef; 3] = [
+        kCVPixelBufferMetalCompatibilityKey,
+        kCVPixelBufferIOSurfacePropertiesKey,
+        kCVPixelBufferPixelFormatTypeKey,
+    ];
+    let values: [*const c_void; 3] = [kCFBooleanTrue, io_props, fmt_num];
+    let attrs = CFDictionaryCreate(
+        kCFAllocatorDefault,
+        keys.as_ptr() as *const *const c_void,
+        values.as_ptr(),
+        3,
+        key_cb,
+        val_cb,
+    );
+    // The attrs dict retains its keys/values; release our local refs.
+    if !io_props.is_null() {
+        CFRelease(io_props);
+    }
+    if !fmt_num.is_null() {
+        CFRelease(fmt_num);
+    }
+    attrs
 }
 
 #[link(name = "CoreMedia", kind = "framework")]
@@ -249,6 +337,10 @@ pub struct VideoToolboxDecoder {
     format_desc: CMVideoFormatDescriptionRef,
     session: VTDecompressionSessionRef,
     sink: Arc<Mutex<FrameSink>>,
+    /// Zero-copy mode: hand the retained `CVPixelBuffer` up to the renderer
+    /// instead of memcpy'ing its planes to the CPU. Read once from
+    /// `STARFIRE_ZEROCOPY` (default on for macOS).
+    zero_copy: bool,
     /// Boxed so the callback's `refCon` pointer stays stable for the session's
     /// lifetime. Holds an `Arc` clone of `sink`.
     _callback_ctx: Box<CallbackCtx>,
@@ -256,6 +348,7 @@ pub struct VideoToolboxDecoder {
 
 struct CallbackCtx {
     sink: Arc<Mutex<FrameSink>>,
+    zero_copy: bool,
 }
 
 // The CoreMedia/VT object refs are owned solely by this struct and only touched
@@ -272,16 +365,24 @@ impl VideoToolboxDecoder {
             Codec::H264 => NalCodec::H264,
             Codec::Av1 => return Err(DecodeError::UnsupportedCodec(codec)),
         };
+        // Zero-copy is the default on macOS; STARFIRE_ZEROCOPY=0/off/false/no opts
+        // back into the portable CPU-plane copy (A/B baseline + debugging).
+        let zero_copy = !matches!(
+            std::env::var("STARFIRE_ZEROCOPY").ok().as_deref(),
+            Some("0") | Some("false") | Some("off") | Some("no")
+        );
         let sink = Arc::new(Mutex::new(FrameSink::default()));
         Ok(Self {
             codec,
             nal_codec,
             format_desc: ptr::null(),
             session: ptr::null(),
+            zero_copy,
             // The callback context is (re)bound to `sink` in `ensure_session`,
             // once the session that uses it actually exists.
             _callback_ctx: Box::new(CallbackCtx {
                 sink: Arc::clone(&sink),
+                zero_copy,
             }),
             sink,
         })
@@ -333,6 +434,7 @@ impl VideoToolboxDecoder {
         // address; rebuild it now bound to this decoder's sink.
         self._callback_ctx = Box::new(CallbackCtx {
             sink: Arc::clone(&self.sink),
+            zero_copy: self.zero_copy,
         });
         let refcon = self._callback_ctx.as_ref() as *const CallbackCtx as *mut c_void;
         let callback = VTDecompressionOutputCallbackRecord {
@@ -340,20 +442,24 @@ impl VideoToolboxDecoder {
             decompressionOutputRefCon: refcon,
         };
 
+        // Request IOSurface-backed, Metal-compatible NV12 so the renderer can
+        // import the decoded surface zero-copy. Still a lockable NV12 buffer for
+        // the CPU-copy path. We own `dest_attrs` and release it after create.
+        let dest_attrs = unsafe { make_dest_attrs() };
         let mut session: VTDecompressionSessionRef = ptr::null();
         let status = unsafe {
             VTDecompressionSessionCreate(
                 kCFAllocatorDefault,
                 fmt,
                 ptr::null(), // default (hardware-preferred) decoder
-                // NB: destination attributes (pixel format = NV12) would be set
-                // via a CFDictionary here; VideoToolbox defaults to a biplanar
-                // 4:2:0 format for HEVC/H.264, which we validate at copy time.
-                ptr::null(),
+                dest_attrs,
                 &callback,
                 &mut session,
             )
         };
+        if !dest_attrs.is_null() {
+            unsafe { CFRelease(dest_attrs) };
+        }
         if status != noErr || session.is_null() {
             return Err(DecodeError::Failed(format!(
                 "VTDecompressionSessionCreate failed: OSStatus {status}"
@@ -538,13 +644,40 @@ unsafe extern "C" fn decompression_output(
         return; // dropped frame; not an error
     }
 
-    match copy_pixel_buffer(image_buffer as CVPixelBufferRef, pts.value) {
+    let pb = image_buffer as CVPixelBufferRef;
+    if ctx.zero_copy {
+        // Zero-copy: retain the IOSurface-backed buffer and hand it up; the Metal
+        // renderer samples it directly. No plane lock, no memcpy.
+        let frame = zero_copy_frame(pb, pts.value);
+        if let Ok(mut sink) = ctx.sink.lock() {
+            sink.frames.push(frame);
+        }
+        return;
+    }
+    match copy_pixel_buffer(pb, pts.value) {
         Ok(frame) => {
             if let Ok(mut sink) = ctx.sink.lock() {
                 sink.frames.push(frame);
             }
         }
         Err(e) => push_err(e),
+    }
+}
+
+/// Build a zero-copy [`VideoFrame`]: retain the `CVPixelBuffer` into the frame's
+/// `native` slot and leave `planes` empty. Dimensions come straight off the
+/// buffer; VideoToolbox is configured to emit BT.709-limited NV12.
+unsafe fn zero_copy_frame(pb: CVPixelBufferRef, pts: i64) -> VideoFrame {
+    let width = CVPixelBufferGetWidth(pb) as u32;
+    let height = CVPixelBufferGetHeight(pb) as u32;
+    VideoFrame {
+        width,
+        height,
+        format: PixelFormat::Nv12,
+        color_space: ColorSpace::Bt709Limited,
+        pts,
+        planes: Vec::new(),
+        native: Some(crate::frame::native::NativeSurface::retain(pb)),
     }
 }
 
@@ -593,6 +726,7 @@ unsafe fn copy_pixel_buffer(pb: CVPixelBufferRef, pts: i64) -> Result<VideoFrame
         color_space: ColorSpace::Bt709Limited,
         pts,
         planes,
+        native: None,
     };
     frame.validate()?;
     Ok(frame)

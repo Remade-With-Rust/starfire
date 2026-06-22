@@ -30,13 +30,13 @@ use starfire_core::video::Codec;
 use starfire_audio::{CpalPlayer, OpusAudioDecoder};
 use starfire_decode::select::{create_decoder, Accel};
 use starfire_decode::VideoFrame;
-use starfire_render::{Renderer, VideoRenderer};
+use starfire_render::{new_for_window, ActiveRenderer, Renderer};
 use std::sync::mpsc::Sender;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{CursorGrabMode, Window, WindowId};
+use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 /// Wake-ups sent from the network/decode thread to the render loop.
 enum AppEvent {
@@ -579,13 +579,18 @@ fn audio_thread(rx: std::sync::mpsc::Receiver<Vec<u8>>) {
 struct App {
     latest: Arc<Mutex<Option<VideoFrame>>>,
     window: Option<Arc<Window>>,
-    renderer: Option<VideoRenderer>,
+    renderer: Option<ActiveRenderer>,
     /// Encoded input messages -> network thread -> control channel.
     input_tx: Sender<Vec<u8>>,
     /// Pointer captured (FPS mode): raw mouse motion sent as relative deltas.
     grabbed: bool,
     /// Live keyboard modifier mask (GameStream bits).
     modifiers: u8,
+    /// Currently in borderless fullscreen (toggled with F11).
+    fullscreen: bool,
+    /// Latest decoded frame size, the reference viewport for absolute-mouse
+    /// coordinates (updated each frame).
+    stream_size: Option<(u32, u32)>,
 }
 
 impl App {
@@ -628,6 +633,33 @@ impl App {
             self.modifiers &= !bit;
         }
     }
+
+    /// Enter/leave borderless fullscreen (F11).
+    fn set_fullscreen(&mut self, on: bool) {
+        if let Some(w) = &self.window {
+            w.set_fullscreen(on.then(|| Fullscreen::Borderless(None)));
+            self.fullscreen = on;
+        }
+    }
+
+    /// Forward an absolute cursor position (ungrabbed / desktop mode). The
+    /// renderer stretches the video to fill the window, so this is a straight
+    /// normalize-to-window then scale-to-stream-resolution. Grabbed/FPS mode uses
+    /// the raw relative path (`device_event`) instead.
+    fn send_abs_cursor(&self, x: f64, y: f64) {
+        let (Some(w), Some((sw, sh))) = (&self.window, self.stream_size) else {
+            return;
+        };
+        let size = w.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
+        let nx = (x / size.width as f64).clamp(0.0, 1.0);
+        let ny = (y / size.height as f64).clamp(0.0, 1.0);
+        let sx = (nx * sw as f64).round() as i16;
+        let sy = (ny * sh as f64).round() as i16;
+        self.send(input::mouse_move_abs(sx, sy, sw as i16, sh as i16));
+    }
 }
 
 impl ApplicationHandler<AppEvent> for App {
@@ -635,7 +667,16 @@ impl ApplicationHandler<AppEvent> for App {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes().with_title("Starfire");
+        // Start fullscreen by default (like Moonlight); STARFIRE_FULLSCREEN=0 to
+        // start windowed. F11 toggles either way.
+        let start_fs = !matches!(
+            env("STARFIRE_FULLSCREEN").as_deref(),
+            Some("0") | Some("off") | Some("false") | Some("no")
+        );
+        let mut attrs = Window::default_attributes().with_title("Starfire");
+        if start_fs {
+            attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(None)));
+        }
         let window = match el.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -644,8 +685,9 @@ impl ApplicationHandler<AppEvent> for App {
                 return;
             }
         };
+        self.fullscreen = start_fs;
         let size = window.inner_size();
-        match VideoRenderer::new(window.clone(), size.width.max(1), size.height.max(1)) {
+        match new_for_window(window.clone(), size.width.max(1), size.height.max(1)) {
             Ok(r) => self.renderer = Some(r),
             Err(e) => {
                 eprintln!("[starfire] renderer init failed: {e}");
@@ -659,6 +701,13 @@ impl ApplicationHandler<AppEvent> for App {
     fn user_event(&mut self, el: &ActiveEventLoop, event: AppEvent) {
         match event {
             AppEvent::Frame => {
+                // Cache the stream resolution (reference viewport for absolute
+                // mouse) and ask the window to redraw.
+                if let Ok(slot) = self.latest.lock() {
+                    if let Some(f) = slot.as_ref() {
+                        self.stream_size = Some((f.width, f.height));
+                    }
+                }
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
@@ -712,10 +761,26 @@ impl ApplicationHandler<AppEvent> for App {
                     self.send(input::scroll_horizontal(dx as i16));
                 }
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                // Desktop/absolute mode: forward the cursor position when the
+                // pointer isn't grabbed. Grabbed/FPS mode uses raw relative deltas
+                // from `device_event` instead.
+                if !self.grabbed {
+                    self.send_abs_cursor(position.x, position.y);
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     if code == KeyCode::Escape && self.grabbed {
                         self.ungrab(); // Esc releases the pointer
+                        return;
+                    }
+                    if code == KeyCode::F11 {
+                        // Toggle fullscreen locally; never forward F11 to the host.
+                        if event.state == ElementState::Pressed {
+                            let on = !self.fullscreen;
+                            self.set_fullscreen(on);
+                        }
                         return;
                     }
                     if let Some(vk) = vk_from_keycode(code) {
@@ -829,6 +894,8 @@ fn main() {
         input_tx,
         grabbed: false,
         modifiers: 0,
+        fullscreen: false,
+        stream_size: None,
     };
     event_loop.run_app(&mut app).expect("run event loop");
 }
