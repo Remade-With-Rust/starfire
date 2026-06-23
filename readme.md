@@ -74,6 +74,14 @@ streaming video and audio, combined with Starfire provide state of the art perfo
 for rust deployments. The Gaming tool deploying both of these solutions is free for 
 anyone using our Home Computer application.
 
+| | Sunshine (C/C++) | **Comet (Rust)** | Change |
+|---|---:|---:|:---:|
+| Host latency (capture + encode) | 7.7 ms | **3.7 ms** | **2.1× better** |
+| Decode latency¹ | 3.6 ms | **0.9 ms** | **3.8× better** |
+| Capture | n/a (internal) | **0.25 ms** | — |
+
+<sub>Measured 1280×720 @ 60 fps, single-GPU NVIDIA host, same Wi-Fi LAN, back-to-back runs. ¹Client-side, Starfire vs Moonlight. Methodology + raw captures: [tests/benchmarks/FINAL-REPORT.md](tests/benchmarks/FINAL-REPORT.md).</sub>
+
 ## Remade With Rust
 
 **Remade With Rust** is an initiative by [Mata Network](https://www.mata.network)
