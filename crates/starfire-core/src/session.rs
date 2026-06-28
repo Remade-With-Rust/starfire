@@ -122,7 +122,19 @@ impl StreamSession {
         // production client would `resume()` an owned session instead.
         let _ = client.cancel();
         let session = client.launch(app_id, launch)?;
-        let mut rtsp = RtspClient::new(&session.rtsp_url, Duration::from_secs(10))?;
+        // The launch response's `rtsp_url` carries the HOST's own view of its
+        // address — e.g. a VM's internal 192.168.122.x behind the box's NAT, which
+        // the client can't reach. Reconnect RTSP at the address we actually dialed
+        // (`host`), keeping the host's advertised port. Without this the RTSP
+        // handshake hangs on the unreachable internal IP and video never starts.
+        let rtsp_port = session
+            .rtsp_url
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.trim_end_matches('/').parse::<u16>().ok())
+            .unwrap_or(48010);
+        let rtsp_url = format!("rtsp://{host}:{rtsp_port}");
+        let mut rtsp = RtspClient::new(&rtsp_url, Duration::from_secs(10))?;
         let rs = rtsp.handshake(announce)?; // OPTIONS..ANNOUNCE..PLAY — arms the host
 
         // The control channel must connect before any RTP can flow (the host
