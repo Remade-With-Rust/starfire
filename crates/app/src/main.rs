@@ -444,6 +444,19 @@ fn run_session(
         announce_cfg.fec_percent,
         announce_cfg.packet_size,
     );
+    // Negotiate the video codec from the host's /serverinfo: the host advertises
+    // (via `<VideoCodec>`) the codec it will actually send — HEVC normally, H264
+    // when it has no working hardware HEVC encoder (e.g. a GPU-less VM running
+    // comet's OpenH264 software path). `STARFIRE_CODEC` overrides for testing;
+    // absent/unknown → assume HEVC (the historical default). Done before `client`
+    // is moved into the session.
+    let codec = std::env::var("STARFIRE_CODEC")
+        .ok()
+        .and_then(|v| Codec::from_wire(&v))
+        .or_else(|| client.server_info().ok().and_then(|i| i.negotiated_codec()))
+        .unwrap_or(Codec::Hevc);
+    eprintln!("[starfire] negotiated video codec: {codec:?}");
+
     let mut sess = match StreamSession::start(client, &host, &app, &launch_cfg, &announce_cfg) {
         Ok(s) => s,
         Err(e) => stop!("session start: {e}"),
@@ -455,20 +468,20 @@ fn run_session(
     let made = match &shared {
         Some(dev) => {
             starfire_decode::backend::mediafoundation::MediaFoundationDecoder::with_device(
-                Codec::Hevc,
+                codec,
                 dev.clone(),
             )
             .map(|d| Box::new(d) as Box<dyn starfire_decode::Decoder>)
         }
-        None => create_decoder(Codec::Hevc, Accel::PreferHardware),
+        None => create_decoder(codec, Accel::PreferHardware),
     };
     #[cfg(not(target_os = "windows"))]
-    let made = create_decoder(Codec::Hevc, Accel::PreferHardware);
+    let made = create_decoder(codec, Accel::PreferHardware);
     let mut decoder = match made {
         Ok(d) => d,
         Err(e) => stop!("no video decoder on this platform: {e}"),
     };
-    let mut dep = Depacketizer::new(Codec::Hevc);
+    let mut dep = Depacketizer::new(codec);
 
     eprintln!("[starfire] streaming — decoding frames …");
     let mut buf = [0u8; 2048];

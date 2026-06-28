@@ -59,6 +59,11 @@ pub struct ServerInfo {
     /// 0 = no running app; otherwise the running app id.
     pub current_game: Option<u32>,
     pub state: Option<String>,
+    /// The video codec the host will actually send (`<VideoCodec>`), e.g.
+    /// "HEVC" or "H264". The host advertises HEVC normally and H264 when it has
+    /// no working hardware HEVC encoder (e.g. a GPU-less VM). Absent on hosts
+    /// that don't advertise it → the client assumes HEVC.
+    pub video_codec: Option<String>,
     /// Every leaf element by tag name (last value wins) — the escape hatch for
     /// fields we haven't typed yet.
     pub fields: BTreeMap<String, String>,
@@ -125,8 +130,18 @@ impl ServerInfo {
             pair_status: parse_field(&fields, "PairStatus"),
             current_game: parse_field(&fields, "currentgame"),
             state: fields.get("state").cloned(),
+            video_codec: fields.get("VideoCodec").cloned(),
             fields,
         })
+    }
+
+    /// The codec the host advertised it will send via `<VideoCodec>`, mapped to
+    /// a [`crate::video::Codec`]. `None` when unadvertised or unrecognized — the
+    /// client should then assume HEVC (the historical default).
+    pub fn negotiated_codec(&self) -> Option<crate::video::Codec> {
+        self.video_codec
+            .as_deref()
+            .and_then(crate::video::Codec::from_wire)
     }
 
     /// True when the host reports it is paired with this client identity.

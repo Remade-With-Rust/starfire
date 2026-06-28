@@ -14,6 +14,21 @@ pub enum Codec {
     H264,
 }
 
+impl Codec {
+    /// Map a host-advertised codec string (the `<VideoCodec>` element in
+    /// `/serverinfo`, or the `STARFIRE_CODEC` override) to a `Codec`.
+    /// Case-insensitive; accepts the common aliases. Returns `None` for an
+    /// unknown value so the caller can fall back to its default.
+    pub fn from_wire(s: &str) -> Option<Codec> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "hevc" | "h265" | "h.265" => Some(Codec::Hevc),
+            "h264" | "h.264" | "avc" => Some(Codec::H264),
+            "av1" => Some(Codec::Av1),
+            _ => None,
+        }
+    }
+}
+
 /// One coded frame handed to the decoder (AV1 OBUs / HEVC|H.264 NALs).
 /// The exact AU framing per codec is [CAPTURE-LOCKED].
 #[derive(Debug, Clone, PartialEq, Eq)]
