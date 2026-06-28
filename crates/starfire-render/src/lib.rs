@@ -227,9 +227,23 @@ impl Renderer for ActiveRenderer {
     }
 }
 
+/// Whether to present with vsync. **Defaults OFF** — game streaming wants the
+/// lowest present latency (vsync can add up to a full frame of wait), and an
+/// immediate present also lets a variable-refresh display (VRR / G-Sync /
+/// FreeSync / ProMotion) sync to the stream's frame rate on its own, which is
+/// tear-free *and* low-latency. Opt back into fixed-rate vsync with
+/// `STARFIRE_VSYNC=1` (e.g. a fixed-refresh panel where tearing is objectionable).
+#[allow(dead_code)] // used by the Windows (D3D11) and macOS (Metal) backends
+fn vsync_enabled() -> bool {
+    matches!(
+        std::env::var("STARFIRE_VSYNC").ok().as_deref(),
+        Some("1") | Some("on") | Some("true") | Some("yes")
+    )
+}
+
 /// Build the Windows zero-copy D3D11 renderer on the shared decode device. The
 /// app uses this (instead of [`new_for_window`]) when the decoder produces D3D11
-/// textures. `STARFIRE_VSYNC=0` → immediate present.
+/// textures. Vsync defaults OFF (lowest latency); `STARFIRE_VSYNC=1` re-enables it.
 #[cfg(target_os = "windows")]
 pub fn new_d3d11_for_window<W: winit::raw_window_handle::HasWindowHandle>(
     window: &W,
@@ -237,17 +251,14 @@ pub fn new_d3d11_for_window<W: winit::raw_window_handle::HasWindowHandle>(
     width: u32,
     height: u32,
 ) -> Result<ActiveRenderer, RenderError> {
-    let vsync = !matches!(
-        std::env::var("STARFIRE_VSYNC").ok().as_deref(),
-        Some("0") | Some("false") | Some("off") | Some("no")
-    );
-    d3d11::D3d11Renderer::new(window, shared, width, height, vsync).map(ActiveRenderer::D3d11)
+    d3d11::D3d11Renderer::new(window, shared, width, height, vsync_enabled())
+        .map(ActiveRenderer::D3d11)
 }
 
 /// Build the renderer for `window`. On macOS, the zero-copy Metal backend unless
-/// `STARFIRE_RENDER=wgpu`; `STARFIRE_VSYNC=0` makes the Metal path present
-/// immediately (lowest latency). Non-macOS always returns the `wgpu` backend, so
-/// that path is unchanged.
+/// `STARFIRE_RENDER=wgpu`; the Metal path presents immediately by default (lowest
+/// latency, VRR-friendly), `STARFIRE_VSYNC=1` re-enables vsync. Non-macOS always
+/// returns the `wgpu` backend, so that path is unchanged.
 pub fn new_for_window<W>(window: W, width: u32, height: u32) -> Result<ActiveRenderer, RenderError>
 where
     W: wgpu::WindowHandle + 'static,
@@ -256,11 +267,7 @@ where
     {
         let force_wgpu = std::env::var("STARFIRE_RENDER").ok().as_deref() == Some("wgpu");
         if !force_wgpu {
-            let vsync = !matches!(
-                std::env::var("STARFIRE_VSYNC").ok().as_deref(),
-                Some("0") | Some("false") | Some("off") | Some("no")
-            );
-            return metal::MetalRenderer::new(&window, width, height, vsync)
+            return metal::MetalRenderer::new(&window, width, height, vsync_enabled())
                 .map(ActiveRenderer::Metal);
         }
     }

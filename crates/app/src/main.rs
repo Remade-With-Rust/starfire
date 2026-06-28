@@ -155,6 +155,45 @@ fn keep_awake() {
 #[cfg(not(target_os = "macos"))]
 fn keep_awake() {}
 
+/// This display's native refresh rate in Hz (#6), so the client requests its own
+/// panel's rate (a 120 Hz laptop gets 120 fps, not a hardcoded 60). macOS via
+/// `NSScreen.maximumFramesPerSecond`; other platforms return `None` (use the
+/// configured/default fps). The host caps to its own capture refresh, so the
+/// effective rate is the min of the two.
+#[cfg(target_os = "macos")]
+fn display_refresh_hz() -> Option<u32> {
+    use std::ffi::c_void;
+    type Id = *mut c_void;
+    type Sel = *const c_void;
+    #[link(name = "objc", kind = "dylib")]
+    #[link(name = "AppKit", kind = "framework")]
+    extern "C" {
+        fn objc_getClass(name: *const std::os::raw::c_char) -> Id;
+        fn sel_registerName(name: *const std::os::raw::c_char) -> Sel;
+        fn objc_msgSend();
+    }
+    // SAFETY: standard objc runtime calls (same pattern as keep_awake);
+    // maximumFramesPerSecond returns NSInteger.
+    unsafe {
+        let send: extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc_msgSend as *const ());
+        let send_i: extern "C" fn(Id, Sel) -> isize = std::mem::transmute(objc_msgSend as *const ());
+        let class = objc_getClass(c"NSScreen".as_ptr());
+        if class.is_null() {
+            return None;
+        }
+        let screen = send(class, sel_registerName(c"mainScreen".as_ptr()));
+        if screen.is_null() {
+            return None;
+        }
+        let hz = send_i(screen, sel_registerName(c"maximumFramesPerSecond".as_ptr()));
+        (hz >= 24).then_some(hz as u32)
+    }
+}
+#[cfg(not(target_os = "macos"))]
+fn display_refresh_hz() -> Option<u32> {
+    None
+}
+
 /// Auto-submit the pairing PIN to the host's web API (so pairing completes
 /// without touching the host). No-op if web creds aren't provided.
 fn submit_pin(host: &str, pin: &str) {
@@ -919,6 +958,14 @@ fn vk_from_keycode(code: KeyCode) -> Option<u16> {
 #[allow(clippy::expect_used)]
 fn main() {
     keep_awake(); // never let App Nap / display sleep throttle the stream
+
+    // #6: request this display's native refresh unless the operator pinned it.
+    if env("STARFIRE_FPS").is_none() {
+        if let Some(hz) = display_refresh_hz() {
+            eprintln!("[starfire] display {hz} Hz → requesting {hz} fps (STARFIRE_FPS overrides)");
+            std::env::set_var("STARFIRE_FPS", hz.to_string());
+        }
+    }
 
     let latest: Arc<Mutex<Option<VideoFrame>>> = Arc::new(Mutex::new(None));
     // Captured input (main/winit thread) -> network thread -> control channel.
