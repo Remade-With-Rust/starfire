@@ -181,11 +181,10 @@ fn parse_session(xml: &[u8], rikey: [u8; 16], rikey_id: i32) -> crate::Result<Se
 
 /// Parse `/applist` — a `<root>` of repeated `<App>` records.
 pub fn parse_applist(xml: &[u8]) -> crate::Result<Vec<App>> {
-    use quick_xml::events::Event;
-    use quick_xml::Reader;
+    use rusty_xml_reader::{ReaderType, XmlTextReader};
 
-    let mut reader = Reader::from_reader(xml);
-    let mut buf = Vec::new();
+    let mut reader = XmlTextReader::xml_reader_for_memory(xml, None, None, 0)
+        .map_err(|e| crate::Error::Protocol(format!("/applist XML: {e}")))?;
     let mut apps = Vec::new();
     let mut in_app = false;
     let mut cur_tag: Option<String> = None;
@@ -193,37 +192,50 @@ pub fn parse_applist(xml: &[u8]) -> crate::Result<Vec<App>> {
     let mut id = String::new();
     let mut hdr = false;
 
+    // libxml2 `read()`: 1 = a node, 0 = end of document, -1 = error.
     loop {
-        match reader
-            .read_event_into(&mut buf)
-            .map_err(|e| crate::Error::Protocol(format!("/applist XML: {e}")))?
-        {
-            Event::Start(e) => {
-                let name = crate::xml::local_name(e.name().into_inner());
+        match reader.read() {
+            1 => {}
+            0 => break,
+            _ => {
+                return Err(crate::Error::Protocol(
+                    "/applist XML: malformed document".into(),
+                ))
+            }
+        }
+        match reader.node_type() {
+            ReaderType::Element => {
+                // The reader returns the local name with any `ns:` prefix stripped.
+                let name = reader.local_name().unwrap_or_default().to_string();
                 if name == "App" {
                     in_app = true;
                     title.clear();
                     id.clear();
                     hdr = false;
                 }
-                cur_tag = Some(name);
+                let empty = reader.is_empty_element();
+                cur_tag = Some(name.clone());
+                // `<App/>` would otherwise never close.
+                if empty && name == "App" {
+                    in_app = false;
+                    cur_tag = None;
+                }
             }
-            Event::Text(e) if in_app => {
-                let text = e
-                    .unescape()
-                    .map_err(|e| crate::Error::Protocol(format!("/applist text: {e}")))?;
-                let t = text.trim();
-                if !t.is_empty() {
-                    match cur_tag.as_deref() {
-                        Some("AppTitle") => title = t.to_string(),
-                        Some("ID") => id = t.to_string(),
-                        Some("IsHdrSupported") => hdr = t == "1",
-                        _ => {}
+            ReaderType::Text | ReaderType::CData if in_app => {
+                if let Some(text) = reader.value() {
+                    let t = text.trim();
+                    if !t.is_empty() {
+                        match cur_tag.as_deref() {
+                            Some("AppTitle") => title = t.to_string(),
+                            Some("ID") => id = t.to_string(),
+                            Some("IsHdrSupported") => hdr = t == "1",
+                            _ => {}
+                        }
                     }
                 }
             }
-            Event::End(e) => {
-                if crate::xml::local_name(e.name().into_inner()) == "App" {
+            ReaderType::EndElement => {
+                if reader.local_name().unwrap_or_default() == "App" {
                     in_app = false;
                     if !id.is_empty() {
                         apps.push(App {
@@ -235,10 +247,8 @@ pub fn parse_applist(xml: &[u8]) -> crate::Result<Vec<App>> {
                 }
                 cur_tag = None;
             }
-            Event::Eof => break,
             _ => {}
         }
-        buf.clear();
     }
     Ok(apps)
 }

@@ -24,65 +24,51 @@ impl Flat {
 /// last-wins; for genuinely repeated records (e.g. `/applist`'s `<App>`) use a
 /// dedicated parser instead.
 pub fn parse_flat(xml: &[u8]) -> crate::Result<Flat> {
-    use quick_xml::events::Event;
-    use quick_xml::Reader;
+    use rusty_xml_reader::{ReaderType, XmlTextReader};
 
-    let mut reader = Reader::from_reader(xml);
-    let mut buf = Vec::new();
+    let mut reader = XmlTextReader::xml_reader_for_memory(xml, None, None, 0)
+        .map_err(|e| crate::Error::Protocol(format!("XML: {e}")))?;
     let mut stack: Vec<String> = Vec::new();
     let mut out = Flat::default();
 
+    // `read()` follows libxml2: 1 = a node, 0 = end of document, -1 = error.
     loop {
-        match reader
-            .read_event_into(&mut buf)
-            .map_err(|e| crate::Error::Protocol(format!("XML: {e}")))?
-        {
-            Event::Start(e) => {
-                let name = local_name(e.name().into_inner());
+        match reader.read() {
+            1 => {}
+            0 => break,
+            _ => return Err(crate::Error::Protocol("XML: malformed document".into())),
+        }
+        match reader.node_type() {
+            ReaderType::Element => {
+                // The reader returns the local name with any `ns:` prefix stripped.
+                let name = reader.local_name().unwrap_or_default().to_string();
                 if name == "root" {
-                    out.status_code = attr(&e, b"status_code").and_then(|v| v.parse().ok());
-                    out.status_message = attr(&e, b"status_message");
+                    out.status_code =
+                        reader.get_attribute("status_code").and_then(|v| v.parse().ok());
+                    out.status_message = reader.get_attribute("status_message");
                 }
-                stack.push(name);
+                // `<tag/>` raises no EndElement, so it must not be pushed.
+                if !reader.is_empty_element() {
+                    stack.push(name);
+                }
             }
-            Event::Text(e) => {
-                let text = e
-                    .unescape()
-                    .map_err(|e| crate::Error::Protocol(format!("XML text: {e}")))?;
-                let trimmed = text.trim();
-                if !trimmed.is_empty() {
-                    if let Some(cur) = stack.last() {
-                        out.fields.insert(cur.clone(), trimmed.to_string());
+            ReaderType::Text | ReaderType::CData => {
+                if let Some(text) = reader.value() {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        if let Some(cur) = stack.last() {
+                            out.fields.insert(cur.clone(), trimmed.to_string());
+                        }
                     }
                 }
             }
-            Event::End(_) => {
+            ReaderType::EndElement => {
                 stack.pop();
             }
-            Event::Eof => break,
             _ => {}
         }
-        buf.clear();
     }
     Ok(out)
-}
-
-/// Strip any `ns:` prefix from an element name (used across the crate boundary
-/// by `starfire-core`'s `/applist` record parser, so it is `pub`).
-pub fn local_name(name: &[u8]) -> String {
-    let s = String::from_utf8_lossy(name);
-    s.rsplit(':').next().unwrap_or(&s).to_string()
-}
-
-fn attr(e: &quick_xml::events::BytesStart, key: &[u8]) -> Option<String> {
-    e.attributes()
-        .flatten()
-        .find(|a| a.key.into_inner() == key)
-        .and_then(|a| {
-            std::str::from_utf8(a.value.as_ref())
-                .ok()
-                .map(str::to_string)
-        })
 }
 
 #[cfg(test)]

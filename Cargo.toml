@@ -27,11 +27,25 @@ rust-version = "1.95"
 thiserror = "2"
 tracing = "0.1"
 # protocol-core libs (added to crates as their layers land)
-reed-solomon-erasure = "6"
+#
+# No erasure-coding crate. `reed-solomon-erasure` was declared here and never
+# used: video FEC is first-party (starfire-core `video::fec`), because it has to
+# be matrix-compatible with Sunshine's `nanors` encoder.
+#
+# If that layer ever does want a crate, the house one is `rusty_erasure` — an
+# ISA-L remake, matrix-flexible GF(2^8) Reed-Solomon. What would have to be
+# proved first is the thing video.rs's decisive FEC test already asserts:
+# a nanors-compatible Cauchy matrix at k=35 data + p=7 parity. rusty_erasure's
+# published conformance grid is Cauchy k=1..32, so k=35 is outside what it
+# states, and swapping it in unverified would trade a working first-party
+# decoder for an unproven one.
 sha2 = "0.10"
 aes = "0.8"
 aes-gcm = "0.10"
-quick-xml = "0.36"
+# House XML, not quick-xml. rusty_xml-reader is the xmlTextReader pull parser
+# and gives `local_name()` with the prefix already stripped plus
+# `get_attribute(name)`, so the GameStream parsers lost their own helpers.
+rusty_xml-reader = "0.8.1"
 rcgen = "0.13"     # self-signed client identity cert (F2)
 getrandom = "0.2"  # OS randomness for salt/challenge/secret (F2)
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] } # sign pairing secret (F2)
