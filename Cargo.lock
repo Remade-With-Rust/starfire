@@ -2006,15 +2006,6 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
 name = "quick-xml"
-version = "0.36.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7649a7b4df05aed9ea7ec6f628c67c9953a43869b8bc50929569b2999d443fe"
-dependencies = [
- "memchr",
-]
-
-[[package]]
-name = "quick-xml"
 version = "0.39.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdcc8dd4e2f670d309a5f0e83fe36dfdc05af317008fea29144da1a2ac858e5e"
@@ -2261,6 +2252,38 @@ checksum = "e1c0b43e27d8d86bb3a15b9eac232b6d78a06afee258a9861deb5a0d15b65c33"
 dependencies = [
  "js-sys",
 ]
+
+[[package]]
+name = "rusty_xml-parser"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ce36ad91cb38453fac219586afcbea526a8b24b0989b119c61e45e7448e5d2c"
+dependencies = [
+ "rusty_xml-sax",
+ "rusty_xml-tree",
+]
+
+[[package]]
+name = "rusty_xml-reader"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32f9aaba9e59cd3aafee7e094d7fe2cc0fdeeb066eb0dab118b824b512216c8f"
+dependencies = [
+ "rusty_xml-parser",
+ "rusty_xml-tree",
+]
+
+[[package]]
+name = "rusty_xml-sax"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8542e0d8dc4535799b5e592510d8dcde64739e7a83dc9bf53b231128e587aff4"
+
+[[package]]
+name = "rusty_xml-tree"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17a39069fb550d81c80f1d71eba30dda906965c6951a8b7d16ffa1fcbf1721a7"
 
 [[package]]
 name = "same-file"
@@ -2516,11 +2539,11 @@ dependencies = [
  "aes-gcm",
  "getrandom 0.2.17",
  "p256",
- "quick-xml 0.36.2",
  "rcgen",
  "rustls",
  "rustls-pki-types",
  "rusty_enet",
+ "rusty_xml-reader",
  "sha2",
  "starfire-protocol",
  "starfire-testkit",
@@ -2560,8 +2583,8 @@ dependencies = [
  "aes",
  "getrandom 0.2.17",
  "p256",
- "quick-xml 0.36.2",
  "rcgen",
+ "rusty_xml-reader",
  "sha2",
  "thiserror 2.0.18",
  "x509-parser",
@@ -3060,7 +3083,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c324a910fd86ebdc364a3e61ec1f11737d3b1d6c273c0239ee8ff4bc0d24b4a"
 dependencies = [
  "proc-macro2",
- "quick-xml 0.39.4",
+ "quick-xml",
  "quote",
 ]
 

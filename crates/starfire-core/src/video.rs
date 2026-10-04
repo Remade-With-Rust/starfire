@@ -193,9 +193,9 @@ mod fixture_tests {
 
     /// THE decisive FEC test: take frame 1's real captured shards (35 data + 7
     /// parity), drop a data shard, recover it from parity, and assert it matches
-    /// the real one byte-for-byte. This proves `reed-solomon-erasure`'s matrix is
-    /// compatible with Sunshine's `nanors` encoder (if it fails, we need a
-    /// matrix-matched decoder).
+    /// the real one byte-for-byte. This proves OUR matrix is compatible with
+    /// Sunshine's `nanors` encoder — the reason FEC here is first-party rather
+    /// than a crate, and the test any candidate crate would have to pass.
     ///
     /// Acceptance test for the `nanors`-compatible Cauchy RS decoder.
     #[test]
