@@ -56,7 +56,18 @@ One frame spans many packets (one per shard); the FEC **shard** is exactly
 - A FEC **block** = `k` data shards `0..k-1` then `m` parity `k..k+m-1`, all
   blocksize-padded; `m = ceil(k·pct/100)` (the host re-encodes the final pct, so
   the client derives `m` from `data_shards` and `pct` alone). Recover any ≤ `m`
-  losses. Up to 4 independent FEC blocks per frame (multi-block: TODO).
+  losses. A frame too large for one 255-shard block is split into up to 4
+  independent blocks (`multiFecBlocks` @ NV+11: this shard's block index in bits
+  4-5, the frame's last block index in bits 6-7, on data and parity shards alike;
+  shard indices and `dataShards` are per block). Implemented on both ends and
+  round-tripped host <-> client; the bit positions are from the Sunshine server's
+  sender and remain **[CAPTURE-LOCKED]** until a captured multi-block Sunshine
+  frame confirms them (the single-block capture shows `0x00`, which is consistent).
+- **Parity shards are identified by index, not by flags.** On a Sunshine parity
+  packet only `frameIndex` and `fecInfo` are meaningful; the `flags` byte holds
+  coded bytes (5 of the 7 parity packets of the captured IDR have the PIC_DATA
+  bit clear). A receiver that requires PIC_DATA on every packet silently throws
+  most of the parity away.
 - Acceptance (golden) tests live in `video.rs::fixture_tests`: deterministic loss
   injection → recovered shards `==` the real pre-loss bytes, byte-for-byte.
 

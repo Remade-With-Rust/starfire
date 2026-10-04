@@ -30,3 +30,5 @@ getrandom = { workspace = true }
 rcgen = { workspace = true }
 p256 = { workspace = true }
 x509-parser = { workspace = true }
+# video FEC (shared client+host): Reed-Solomon kernels behind fec::Fec
+rusty_erasure = { workspace = true }

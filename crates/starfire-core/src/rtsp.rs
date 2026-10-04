@@ -83,6 +83,13 @@ pub struct AnnounceConfig {
     /// audio + control (only valid when the host's encryption mode is not
     /// MANDATORY for this client, e.g. `lan_encryption_mode = 0`).
     pub encryption_enabled: u32,
+    /// Size in bytes of our video receive buffer, announced to the host as
+    /// `x-sf-client.recvBufferBytes` (0 = say nothing). A host that understands
+    /// it can send a whole frame back to back instead of pacing it to protect a
+    /// small buffer; a host that does not simply ignores the attribute.
+    /// [`StreamSession`](crate::session::StreamSession) fills this in with the
+    /// size the OS actually granted.
+    pub recv_buffer_bytes: u32,
 }
 
 impl Default for AnnounceConfig {
@@ -96,6 +103,7 @@ impl Default for AnnounceConfig {
             fec_percent: 50,
             packet_size: 1392,
             encryption_enabled: 0,
+            recv_buffer_bytes: 0,
         }
     }
 }
@@ -217,7 +225,7 @@ impl RtspClient {
     fn build_announce_sdp(&self, cfg: &AnnounceConfig) -> String {
         let host = &self.host;
         let kbps = cfg.bitrate_kbps;
-        [
+        let mut lines = vec![
             "v=0".to_string(),
             format!("o=android 0 14 IN IPv4 {host}"),
             "s=NVIDIA Streaming Client".to_string(),
@@ -265,9 +273,15 @@ impl RtspClient {
             format!("a=x-ss-general.encryptionEnabled:{}", cfg.encryption_enabled),
             "a=x-ss-video[0].chromaSamplingType:0".to_string(),
             "a=x-ss-video[0].intraRefresh:0".to_string(),
-            String::new(),
-        ]
-        .join("\r\n")
+        ];
+        if cfg.recv_buffer_bytes > 0 {
+            lines.push(format!(
+                "a=x-sf-client.recvBufferBytes:{}",
+                cfg.recv_buffer_bytes
+            ));
+        }
+        lines.push(String::new());
+        lines.join("\r\n")
     }
 
     /// Send `ANNOUNCE` with the stream config SDP. Arms the host's session so it
@@ -458,6 +472,25 @@ mod tests {
         let c = RtspClient::new("rtsp://127.0.0.1:48010", Duration::from_secs(1)).unwrap();
         assert_eq!(c.target(), "rtsp://127.0.0.1:48010");
         assert_eq!(c.next_cseq(), 1);
+    }
+
+    /// The receive-buffer attribute appears only when a size is given, so a
+    /// default announce is byte-for-byte what it was.
+    #[test]
+    fn announce_states_the_receive_buffer_only_when_known() {
+        let c = RtspClient::new("rtsp://127.0.0.1:48010", Duration::from_secs(1)).unwrap();
+        let plain = c.build_announce_sdp(&AnnounceConfig::default());
+        assert!(!plain.contains("x-sf-client"));
+        assert!(plain.ends_with("a=x-ss-video[0].intraRefresh:0\r\n"));
+        let with = c.build_announce_sdp(&AnnounceConfig {
+            recv_buffer_bytes: 4_194_304,
+            ..AnnounceConfig::default()
+        });
+        assert!(with.ends_with("a=x-sf-client.recvBufferBytes:4194304\r\n"));
+        assert_eq!(
+            with.replace("a=x-sf-client.recvBufferBytes:4194304\r\n", ""),
+            plain
+        );
     }
 
     #[test]

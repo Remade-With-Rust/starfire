@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Starfire desktop client — the end-to-end "picture on screen" path.
 //!
-//! Pairs with a Sunshine host, launches an app, brings up the data plane
-//! ([`StreamSession`]), and pumps received RTP video through the depacketizer →
-//! [`starfire_decode`] (OS-native HW decode) → [`starfire_render`] (wgpu) to a
-//! window. The protocol/decode work runs on a network thread; the main thread is
-//! the winit event loop (where the window + GPU surface must live).
+//! This app is a thin consumer of [`starfire_client::Client`], which owns the
+//! whole pipeline (pair → launch → receive → reassemble → decode). The app adds
+//! what only an app can: a window, the renderer, audio playback, and input
+//! capture. The main thread is the winit event loop (where the window + GPU
+//! surface must live); the client wakes it the instant a frame is decoded.
 //!
 //! Run (on the client machine, in a GUI session):
 //! ```text
@@ -16,42 +16,36 @@
 //! `STARFIRE_HOST` is required (an IP the host can reach back — not loopback).
 //! The web creds let it auto-enter the pairing PIN via the host's web API; omit
 //! them to enter the PIN on the host yourself.
+//!
+//! Measuring: `STARFIRE_BENCH=1` (optionally `STARFIRE_BENCH_SECS=20`) streams
+//! for that long after a short warm-up, prints the client's latency timeline
+//! ([`starfire_client::ClientStats`]) and exits. `STARFIRE_HEADLESS=1` runs
+//! without a window (decode only — the `present` rows then have no samples).
 
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use starfire_core::input::{self, MouseButton as SfButton};
-use starfire_core::launch::LaunchConfig;
-use starfire_core::rtsp::AnnounceConfig;
-use starfire_core::session::{self, StreamSession};
-use starfire_core::video::reassembly::Depacketizer;
-use starfire_core::video::Codec;
 use starfire_audio::{CpalPlayer, OpusAudioDecoder};
-use starfire_decode::select::{create_decoder, Accel};
+use starfire_client::{Client, ClientEvent, ClientStats, StarfireConfig};
+use starfire_core::input::{self, MouseButton as SfButton};
+use starfire_core::video::Codec;
 use starfire_decode::VideoFrame;
 use starfire_render::{new_for_window, ActiveRenderer, Renderer};
-use std::sync::mpsc::Sender;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
-/// A shared D3D11 device threaded to both the decoder and the D3D11 renderer on
-/// Windows (the zero-copy path), so decoded textures need no cross-device sharing.
-/// `Some` ⇒ use the zero-copy D3D11 path; `None`/`()` ⇒ the portable wgpu path.
-#[cfg(target_os = "windows")]
-type Shared = Option<starfire_decode::win_device::SharedDevice>;
-#[cfg(not(target_os = "windows"))]
-type Shared = ();
-
-/// Wake-ups sent from the network/decode thread to the render loop.
+/// Wake-ups delivered to the render loop.
 enum AppEvent {
     /// A new decoded frame is available in the shared slot.
     Frame,
     /// The session ended (error or teardown); the message is for the log.
     Stopped(String),
+    /// Periodic tick for the health line and the benchmark window.
+    Tick,
 }
 
 fn env(key: &str) -> Option<String> {
@@ -63,34 +57,41 @@ fn env_u32(key: &str, default: u32) -> u32 {
     env(key).and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
-/// Build the launch + announce configs from environment knobs so a benchmark
-/// sweep can vary resolution / fps / bitrate / slices / FEC without rebuilding:
+/// True unless the variable is set to an explicit "off" value.
+fn env_on(key: &str) -> bool {
+    !matches!(
+        env(key).as_deref(),
+        Some("0") | Some("off") | Some("false") | Some("no")
+    )
+}
+
+/// Build the client configuration from environment knobs so a benchmark sweep
+/// can vary resolution / fps / bitrate / slices / FEC without rebuilding:
 /// `STARFIRE_W`, `STARFIRE_H`, `STARFIRE_FPS`, `STARFIRE_BITRATE` (kbps),
-/// `STARFIRE_SLICES`, `STARFIRE_FEC` (repair %), `STARFIRE_PKT` (payload bytes).
-fn stream_configs() -> (LaunchConfig, AnnounceConfig) {
-    let ad = AnnounceConfig::default();
-    let (w, h, fps) = (
-        env_u32("STARFIRE_W", ad.width),
-        env_u32("STARFIRE_H", ad.height),
-        env_u32("STARFIRE_FPS", ad.fps),
-    );
-    let announce = AnnounceConfig {
-        width: w,
-        height: h,
-        fps,
-        bitrate_kbps: env_u32("STARFIRE_BITRATE", ad.bitrate_kbps),
-        slices_per_frame: env_u32("STARFIRE_SLICES", ad.slices_per_frame),
-        fec_percent: env_u32("STARFIRE_FEC", ad.fec_percent),
-        packet_size: env_u32("STARFIRE_PKT", ad.packet_size),
-        encryption_enabled: ad.encryption_enabled,
-    };
-    let launch = LaunchConfig {
-        width: w,
-        height: h,
-        fps,
-        ..LaunchConfig::default()
-    };
-    (launch, announce)
+/// `STARFIRE_SLICES`, `STARFIRE_FEC` (repair %), `STARFIRE_PKT` (payload bytes),
+/// `STARFIRE_CODEC`, `STARFIRE_AUDIO=off`, `STARFIRE_ZEROCOPY=0`.
+fn config_from_env() -> Result<StarfireConfig, String> {
+    let d = StarfireConfig::default();
+    Ok(StarfireConfig {
+        host: env("STARFIRE_HOST").ok_or("STARFIRE_HOST not set")?,
+        pin: env("STARFIRE_PIN").unwrap_or(d.pin),
+        device_name: d.device_name,
+        app_name: env("STARFIRE_APP").unwrap_or(d.app_name),
+        width: env_u32("STARFIRE_W", d.width),
+        height: env_u32("STARFIRE_H", d.height),
+        fps: env_u32("STARFIRE_FPS", d.fps),
+        bitrate_kbps: env_u32("STARFIRE_BITRATE", d.bitrate_kbps),
+        slices: env_u32("STARFIRE_SLICES", d.slices),
+        fec_percent: env_u32("STARFIRE_FEC", d.fec_percent),
+        packet_size: env_u32("STARFIRE_PKT", d.packet_size),
+        // Muting is safe: the session keeps the audio port pinged regardless.
+        audio: env_on("STARFIRE_AUDIO"),
+        codec: env("STARFIRE_CODEC").and_then(|v| Codec::from_wire(&v)),
+        zero_copy: env_on("STARFIRE_ZEROCOPY"),
+        // STARFIRE_RT=0 leaves every thread at normal priority (the baseline for
+        // measuring what the promotion buys on this machine).
+        realtime_threads: env_on("STARFIRE_RT"),
+    })
 }
 
 /// Keep the process at full speed for the whole run: disable macOS **App Nap**
@@ -219,425 +220,120 @@ fn submit_pin(host: &str, pin: &str) {
         .output();
 }
 
-/// Benchmark accumulator — the same metrics Moonlight's perf overlay shows, so
-/// back-to-back runs under identical host settings are directly comparable.
-struct BenchStats {
-    start: std::time::Instant,
-    secs: f64,
-    bytes: u64,
-    packets: u64,
-    decode_us: Vec<u32>,
-    interval_us: Vec<u32>,
-    host_lat_tenths: Vec<u16>,
-    rtt_ms: Vec<u32>,
-    last_frame: Option<std::time::Instant>,
-    last_idx: Option<u32>,
-    dropped: u64,
-    width: u32,
-    height: u32,
-    audio_packets: u64,
-    audio_bytes: u64,
+/// Benchmark window: after the stream has settled for [`BENCH_WARMUP`], measure
+/// for the configured number of seconds, print the timeline, and stop.
+struct Reporter {
+    bench_secs: Option<f64>,
+    first_frame: Option<Instant>,
+    measuring_since: Option<Instant>,
+    last_health: Instant,
 }
 
-impl BenchStats {
-    fn new(secs: f64) -> Self {
-        Self {
-            start: std::time::Instant::now(),
-            secs,
-            bytes: 0,
-            packets: 0,
-            decode_us: Vec::new(),
-            interval_us: Vec::new(),
-            host_lat_tenths: Vec::new(),
-            rtt_ms: Vec::new(),
-            last_frame: None,
-            last_idx: None,
-            dropped: 0,
-            width: 0,
-            height: 0,
-            audio_packets: 0,
-            audio_bytes: 0,
-        }
-    }
+/// Settling time before a benchmark window opens (decoder + link warm-up).
+const BENCH_WARMUP: Duration = Duration::from_secs(1);
 
-    fn packet(&mut self, n: usize) {
-        self.packets += 1;
-        self.bytes += n as u64;
-    }
-
-    fn audio(&mut self, n: usize) {
-        self.audio_packets += 1;
-        self.audio_bytes += n as u64;
-    }
-
-    fn frame(&mut self, decode_us: u32, host_lat_tenths: u16, rtt_ms: u32, idx: u32, w: u32, h: u32) {
-        self.decode_us.push(decode_us);
-        self.host_lat_tenths.push(host_lat_tenths);
-        self.rtt_ms.push(rtt_ms);
-        self.width = w;
-        self.height = h;
-        let now = std::time::Instant::now();
-        if let Some(last) = self.last_frame {
-            self.interval_us.push(now.duration_since(last).as_micros() as u32);
-        }
-        self.last_frame = Some(now);
-        if let Some(li) = self.last_idx {
-            if idx > li + 1 {
-                self.dropped += (idx - li - 1) as u64;
-            }
-        }
-        self.last_idx = Some(idx);
-    }
-
-    fn done(&self) -> bool {
-        self.start.elapsed().as_secs_f64() >= self.secs
-    }
-
-    fn report(&self) {
-        let dur = self.start.elapsed().as_secs_f64();
-        let n = self.decode_us.len();
-        let pct = |v: &[u32], p: f64| -> f64 {
-            if v.is_empty() {
-                return 0.0;
-            }
-            let mut s = v.to_vec();
-            s.sort_unstable();
-            s[((s.len() - 1) as f64 * p) as usize] as f64 / 1000.0
-        };
-        let avg = |v: &[u32]| -> f64 {
-            if v.is_empty() {
-                0.0
-            } else {
-                v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64 / 1000.0
-            }
-        };
-        let iv_avg = avg(&self.interval_us);
-        let iv_jitter = {
-            if self.interval_us.len() < 2 {
-                0.0
-            } else {
-                let m = iv_avg * 1000.0;
-                let var = self
-                    .interval_us
-                    .iter()
-                    .map(|&x| (x as f64 - m).powi(2))
-                    .sum::<f64>()
-                    / self.interval_us.len() as f64;
-                var.sqrt() / 1000.0
-            }
-        };
-        let host_avg = if self.host_lat_tenths.is_empty() {
-            0.0
-        } else {
-            self.host_lat_tenths.iter().map(|&x| x as f64).sum::<f64>()
-                / self.host_lat_tenths.len() as f64
-                / 10.0
-        };
-        let mbps = self.bytes as f64 * 8.0 / dur / 1e6;
-        let drop_pct = 100.0 * self.dropped as f64 / (n as f64 + self.dropped as f64).max(1.0);
-
-        eprintln!("\n========= STARFIRE BENCHMARK ({dur:.1}s) =========");
-        eprintln!("resolution      : {}x{}", self.width, self.height);
-        eprintln!("frames decoded  : {n}   |   FPS: {:.1}", n as f64 / dur);
-        eprintln!(
-            "decode time     : avg {:.2} ms   p99 {:.2} ms   max {:.2} ms",
-            avg(&self.decode_us),
-            pct(&self.decode_us, 0.99),
-            pct(&self.decode_us, 1.0)
-        );
-        eprintln!(
-            "frame pacing    : avg {iv_avg:.2} ms   jitter(stdev) {iv_jitter:.2} ms   p99 {:.2} ms",
-            pct(&self.interval_us, 0.99)
-        );
-        eprintln!("host latency    : avg {host_avg:.2} ms   (encoder, from frame header)");
-        let rtt_avg = if self.rtt_ms.is_empty() {
-            0.0
-        } else {
-            self.rtt_ms.iter().map(|&x| x as f64).sum::<f64>() / self.rtt_ms.len() as f64
-        };
-        eprintln!("network RTT     : avg {rtt_avg:.1} ms   (ENet control channel)");
-        eprintln!("recv bitrate    : {mbps:.1} Mbps");
-        eprintln!(
-            "packets         : {}   ({:.0}/s)",
-            self.packets,
-            self.packets as f64 / dur
-        );
-        eprintln!("dropped frames  : {}   ({drop_pct:.2}%)", self.dropped);
-        // Audio plane (Opus, decoded on its own thread; counted at ingest).
-        let ambps = self.audio_bytes as f64 * 8.0 / dur / 1e3;
-        eprintln!(
-            "audio           : {} pkts ({:.0}/s)   {:.0} kbps",
-            self.audio_packets,
-            self.audio_packets as f64 / dur,
-            ambps
-        );
-        // Combined pipeline latency: host encode (Sunshine) + one-way network
-        // (RTT/2) + client decode. Display adds ~half a frame on top.
-        let dec_avg = avg(&self.decode_us);
-        let pipeline = host_avg + rtt_avg / 2.0 + dec_avg;
-        eprintln!(
-            "pipeline latency: ~{pipeline:.1} ms  (host {host_avg:.1} + net {:.1} + decode {dec_avg:.2})",
-            rtt_avg / 2.0
-        );
-        eprintln!("=================================================\n");
-    }
-}
-
-/// The full client bring-up + ingest loop, run on its own thread so the main
-/// thread can own the winit event loop. Decoded frames land in `latest`; each
-/// event (new frame / teardown) is delivered via `emit` — the windowed path
-/// forwards it to the event loop, the headless path just logs.
-fn run_session(
-    latest: Arc<Mutex<Option<VideoFrame>>>,
-    emit: impl Fn(AppEvent),
-    input_rx: std::sync::mpsc::Receiver<Vec<u8>>,
-    shared: Shared,
-) {
-    #[cfg(not(target_os = "windows"))]
-    let _ = &shared;
-    macro_rules! stop {
-        ($($arg:tt)*) => {{
-            emit(AppEvent::Stopped(format!($($arg)*)));
-            return;
-        }};
-    }
-
-    let Some(host) = env("STARFIRE_HOST") else {
-        stop!("STARFIRE_HOST not set");
-    };
-    let pin = env("STARFIRE_PIN").unwrap_or_else(|| "1234".to_string());
-    let app_name = env("STARFIRE_APP").unwrap_or_else(|| "Desktop".to_string());
-
-    // Pairing blocks until the PIN is entered on the host; submit it concurrently.
-    {
-        let (host, pin) = (host.clone(), pin.clone());
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(900));
-            submit_pin(&host, &pin);
+impl Reporter {
+    fn from_env() -> Self {
+        let bench_secs = env("STARFIRE_BENCH").map(|_| {
+            env("STARFIRE_BENCH_SECS")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(20.0)
         });
+        if let Some(secs) = bench_secs {
+            eprintln!("[starfire] benchmarking for {secs}s after a {BENCH_WARMUP:?} warm-up …");
+        }
+        Self {
+            bench_secs,
+            first_frame: None,
+            measuring_since: None,
+            last_health: Instant::now(),
+        }
     }
 
-    eprintln!("[starfire] pairing with {host} …");
-    let client = match session::pair(&host, "Starfire", &pin) {
-        Ok(c) => c,
-        Err(e) => stop!("pair: {e}"),
-    };
-    let apps = match client.applist() {
-        Ok(a) => a,
-        Err(e) => stop!("applist: {e}"),
-    };
-    let Some(app) = apps.iter().find(|a| a.title == app_name).map(|a| a.id.clone()) else {
-        stop!(
-            "app {app_name:?} not found in {:?}",
-            apps.iter().map(|a| &a.title).collect::<Vec<_>>()
-        );
-    };
-
-    let (launch_cfg, announce_cfg) = stream_configs();
-    eprintln!(
-        "[starfire] launching {app_name:?} @ {}x{}x{} {}kbps slices={} fec={}% pkt={} …",
-        announce_cfg.width,
-        announce_cfg.height,
-        announce_cfg.fps,
-        announce_cfg.bitrate_kbps,
-        announce_cfg.slices_per_frame,
-        announce_cfg.fec_percent,
-        announce_cfg.packet_size,
-    );
-    // Negotiate the video codec from the host's /serverinfo: the host advertises
-    // (via `<VideoCodec>`) the codec it will actually send — HEVC normally, H264
-    // when it has no working hardware HEVC encoder (e.g. a GPU-less VM running
-    // comet's OpenH264 software path). `STARFIRE_CODEC` overrides for testing;
-    // absent/unknown → assume HEVC (the historical default). Done before `client`
-    // is moved into the session.
-    let codec = std::env::var("STARFIRE_CODEC")
-        .ok()
-        .and_then(|v| Codec::from_wire(&v))
-        .or_else(|| client.server_info().ok().and_then(|i| i.negotiated_codec()))
-        .unwrap_or(Codec::Hevc);
-    eprintln!("[starfire] negotiated video codec: {codec:?}");
-
-    let mut sess = match StreamSession::start(client, &host, &app, &launch_cfg, &announce_cfg) {
-        Ok(s) => s,
-        Err(e) => stop!("session start: {e}"),
-    };
-
-    // On Windows, build the decoder on the shared D3D11 device (zero-copy textures
-    // the D3D11 renderer can sample); otherwise the portable factory.
-    #[cfg(target_os = "windows")]
-    let made = match &shared {
-        Some(dev) => {
-            starfire_decode::backend::mediafoundation::MediaFoundationDecoder::with_device(
-                codec,
-                dev.clone(),
-            )
-            .map(|d| Box::new(d) as Box<dyn starfire_decode::Decoder>)
+    /// Call periodically. Returns `true` when the benchmark window has closed
+    /// (the report has been printed) and the app should exit.
+    fn tick(&mut self, client: &Client) -> bool {
+        // A stats snapshot sorts every latency window, so take one only when
+        // something is actually due.
+        let health_due = self.last_health.elapsed() >= Duration::from_secs(2);
+        if self.first_frame.is_none() || health_due {
+            let stats = client.stats();
+            if self.first_frame.is_none() && stats.frames_decoded > 0 {
+                self.first_frame = Some(Instant::now());
+                eprintln!(
+                    "[starfire] streaming {:?} {}x{}",
+                    stats.codec.unwrap_or(Codec::Hevc),
+                    stats.resolution.0,
+                    stats.resolution.1
+                );
+            }
+            if health_due {
+                self.last_health = Instant::now();
+                eprintln!("[starfire] {}", health_line(&stats));
+            }
         }
-        None => create_decoder(codec, Accel::PreferHardware),
+        let Some(secs) = self.bench_secs else {
+            return false;
+        };
+        match (self.first_frame, self.measuring_since) {
+            (Some(first), None) if first.elapsed() >= BENCH_WARMUP => {
+                client.reset_stats();
+                self.measuring_since = Some(Instant::now());
+                false
+            }
+            (_, Some(since)) if since.elapsed().as_secs_f64() >= secs => {
+                eprintln!(
+                    "
+{}
+",
+                    client.stats()
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// One-line pipeline health summary (helps diagnose where frames stall).
+fn health_line(s: &ClientStats) -> String {
+    format!(
+        "{:.0} fps  {:.1} Mbps  rtt {:.1} ms | pipeline p50 {:.2} p99 {:.2} ms | lost {} skipped {} fec {} | decode errs {} | idr reqs {}",
+        s.fps(),
+        s.mbps(),
+        s.rtt.as_secs_f64() * 1000.0,
+        s.pipeline.p50_ms(),
+        s.pipeline.p99_ms(),
+        s.reassembly.frames_lost,
+        s.reassembly.frames_skipped,
+        s.reassembly.frames_recovered,
+        s.decode_errors,
+        s.keyframe_requests,
+    )
+}
+
+/// Start audio for this client: playback on its own thread, or (with
+/// `STARFIRE_AUDIO_FIXTURE=path`) capture 600 raw datagrams to a file for
+/// offline Opus-decoder development (u16-LE length prefix + bytes each).
+fn start_audio(client: &mut Client) {
+    let Some(rx) = client.take_audio() else {
+        eprintln!("[starfire] audio disabled (STARFIRE_AUDIO=off) — video-only");
+        return;
     };
-    #[cfg(not(target_os = "windows"))]
-    let made = create_decoder(codec, Accel::PreferHardware);
-    let mut decoder = match made {
-        Ok(d) => d,
-        Err(e) => stop!("no video decoder on this platform: {e}"),
-    };
-    let mut dep = Depacketizer::new(codec);
-
-    eprintln!("[starfire] streaming — decoding frames …");
-    let mut buf = [0u8; 2048];
-    let mut abuf = [0u8; 2048];
-    let (mut frames, mut pkts, mut aus, mut errs) = (0u64, 0u64, 0u64, 0u64);
-    let mut last_report = std::time::Instant::now();
-    // Loss feedback to the host (Sunshine-compatible): a gap in delivered frame
-    // indices means a frame was lost beyond FEC recovery, so request an IDR
-    // (cooldown-limited) and accumulate the loss for the periodic LOSS_STATS the
-    // host's bitrate estimator consumes.
-    let mut last_decoded_idx: Option<u32> = None;
-    let mut loss_window = 0i32;
-    let mut consec_errs = 0u32;
-    let mut last_idr_req = std::time::Instant::now() - Duration::from_secs(2);
-    let mut last_loss_report = std::time::Instant::now();
-
-    // Benchmark mode: measure for STARFIRE_BENCH_SECS (default 20), print a
-    // report, and exit. Run headless for clean numbers.
-    let mut bench = env("STARFIRE_BENCH").map(|_| {
-        let secs = env("STARFIRE_BENCH_SECS")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(20.0);
-        eprintln!("[starfire] benchmarking for {secs}s …");
-        BenchStats::new(secs)
-    });
-
-    // One-shot audio fixture capture (datagrams: u16-LE len prefix + bytes), then
-    // exit — for offline Opus-decoder development. Set STARFIRE_AUDIO_FIXTURE=path.
-    let mut afix: Option<(String, Vec<u8>)> =
-        env("STARFIRE_AUDIO_FIXTURE").map(|p| (p, Vec::new()));
-    let mut apkts = 0u64;
-
-    // Audio runs on its own thread (decoupled — never gates video). Mute with
-    // STARFIRE_AUDIO=off; the session still pings the audio port (keepalive) via
-    // poll_video, so muting doesn't tear the session down.
-    let audio_on = !matches!(
-        env("STARFIRE_AUDIO").as_deref(),
-        Some("off") | Some("0") | Some("false") | Some("no")
-    );
-    let audio_tx = if audio_on && afix.is_none() {
-        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-        thread::spawn(move || audio_thread(rx));
-        Some(tx)
+    if let Some(path) = env("STARFIRE_AUDIO_FIXTURE") {
+        thread::spawn(move || {
+            let mut data = Vec::new();
+            for pkt in rx.iter().take(600) {
+                data.extend_from_slice(&(pkt.len() as u16).to_le_bytes());
+                data.extend_from_slice(&pkt);
+            }
+            match std::fs::write(&path, &data) {
+                Ok(()) => eprintln!("[starfire] wrote {} audio bytes to {path}", data.len()),
+                Err(e) => eprintln!("[starfire] could not write {path}: {e}"),
+            }
+        });
     } else {
-        if !audio_on {
-            eprintln!("[starfire] audio disabled (STARFIRE_AUDIO=off) — video-only, lowest latency");
-        }
-        None
-    };
-
-    loop {
-        // Send any captured input immediately (drained first for lowest latency).
-        while let Ok(msg) = input_rx.try_recv() {
-            let _ = sess.send_input(&msg);
-        }
-        // Benchmark: finish + report + exit once the window elapses.
-        if let Some(b) = &bench {
-            if b.done() {
-                b.report();
-                std::process::exit(0);
-            }
-        }
-        // Periodic pipeline health report (helps diagnose where frames stall).
-        if last_report.elapsed() > Duration::from_secs(2) {
-            eprintln!("[starfire] rx_pkts={pkts} apkts={apkts} aus={aus} decoded={frames} decode_errs={errs}");
-            last_report = std::time::Instant::now();
-        }
-        // Periodic LOSS_STATS to the host (drives its bitrate estimator).
-        if last_loss_report.elapsed() > Duration::from_millis(500) {
-            let dt = last_loss_report.elapsed().as_millis() as i32;
-            let _ = sess.send_loss_stats(loss_window, dt, last_decoded_idx.unwrap_or(0) as i32);
-            loss_window = 0;
-            last_loss_report = std::time::Instant::now();
-        }
-        // Drain audio every iteration (non-blocking) so it never gates video.
-        while let Some(an) = sess.poll_audio(&mut abuf) {
-            apkts += 1;
-            if let Some(b) = bench.as_mut() {
-                b.audio(an);
-            }
-            if let Some((path, data)) = afix.as_mut() {
-                data.extend_from_slice(&(an as u16).to_le_bytes());
-                data.extend_from_slice(&abuf[..an]);
-                if apkts >= 600 {
-                    std::fs::write(path.as_str(), &*data).ok();
-                    eprintln!("[starfire] wrote {} audio bytes to {path}", data.len());
-                    std::process::exit(0);
-                }
-            } else if let Some(tx) = &audio_tx {
-                let _ = tx.send(abuf[..an].to_vec());
-            }
-        }
-        let Some(n) = sess.poll_video(&mut buf) else {
-            continue;
-        };
-        pkts += 1;
-        if let Some(b) = bench.as_mut() {
-            b.packet(n);
-        }
-        let Some(au) = dep.push(&buf[..n]) else {
-            continue;
-        };
-        aus += 1;
-        let (host_lat, frame_idx) = (au.host_latency_tenths_ms, au.frame_index);
-        let rtt_ms = if bench.is_some() {
-            sess.rtt().as_millis() as u32
-        } else {
-            0
-        };
-        let t0 = std::time::Instant::now();
-        let decoded = decoder.push(&au);
-        let decode_us = t0.elapsed().as_micros() as u32;
-        match decoded {
-            Ok(Some(frame)) => {
-                frames += 1;
-                consec_errs = 0;
-                // Loss for the host's BWE = gaps between *decoded* frames. This
-                // captures both transit loss AND decode-failure cascades (frames
-                // that arrived but couldn't decode), which is the user-visible
-                // damage — so the estimator backs off a rate that's overshooting.
-                if let Some(last) = last_decoded_idx {
-                    if frame_idx > last + 1 {
-                        loss_window += (frame_idx - last - 1) as i32;
-                    }
-                }
-                last_decoded_idx = Some(frame_idx);
-                if let Some(b) = bench.as_mut() {
-                    b.frame(decode_us, host_lat, rtt_ms, frame_idx, frame.width, frame.height);
-                }
-                if frames <= 3 || frames.is_multiple_of(120) {
-                    eprintln!("[starfire] decoded frame {frames}: {}x{}", frame.width, frame.height);
-                }
-                if let Ok(mut slot) = latest.lock() {
-                    *slot = Some(frame);
-                }
-                emit(AppEvent::Frame);
-            }
-            Ok(None) => {}
-            Err(e) => {
-                errs += 1;
-                consec_errs += 1;
-                if errs <= 3 {
-                    eprintln!("[starfire] decode error: {e}");
-                }
-                // Only ask for an IDR when the decoder is genuinely STUCK — a run
-                // of consecutive failures (reference chain broken, no param sets) —
-                // and at most once a second. A single failure usually self-heals at
-                // the next FEC-recovered frame or the periodic IDR, so re-keying for
-                // it just adds a losable keyframe burst.
-                if consec_errs >= 5 && last_idr_req.elapsed() > Duration::from_secs(1) {
-                    let _ = sess.request_idr();
-                    last_idr_req = std::time::Instant::now();
-                    consec_errs = 0;
-                }
-            }
-        }
+        thread::spawn(move || audio_thread(rx));
     }
 }
 
@@ -683,11 +379,11 @@ fn audio_thread(rx: std::sync::mpsc::Receiver<Vec<u8>>) {
 }
 
 struct App {
+    client: Option<Client>,
     latest: Arc<Mutex<Option<VideoFrame>>>,
+    reporter: Reporter,
     window: Option<Arc<Window>>,
     renderer: Option<ActiveRenderer>,
-    /// Encoded input messages -> network thread -> control channel.
-    input_tx: Sender<Vec<u8>>,
     /// Pointer captured (FPS mode): raw mouse motion sent as relative deltas.
     grabbed: bool,
     /// Live keyboard modifier mask (GameStream bits).
@@ -697,8 +393,10 @@ struct App {
     /// Latest decoded frame size, the reference viewport for absolute-mouse
     /// coordinates (updated each frame).
     stream_size: Option<(u32, u32)>,
-    /// Shared D3D11 device for the Windows zero-copy renderer (`()` elsewhere).
-    shared: Shared,
+    /// Fractional relative motion not yet sent. The OS reports sub-pixel deltas;
+    /// carrying the remainder forward means slow, precise movement is not
+    /// rounded away to nothing.
+    rel_remainder: (f64, f64),
 }
 
 impl App {
@@ -712,6 +410,7 @@ impl App {
                 .or_else(|_| w.set_cursor_grab(CursorGrabMode::Confined));
             w.set_cursor_visible(false);
             self.grabbed = true;
+            self.rel_remainder = (0.0, 0.0);
         }
     }
 
@@ -723,8 +422,11 @@ impl App {
         self.grabbed = false;
     }
 
+    /// Input goes straight to the client's control thread and onto the wire.
     fn send(&self, msg: Vec<u8>) {
-        let _ = self.input_tx.send(msg);
+        if let Some(c) = &self.client {
+            c.send_input(msg);
+        }
     }
 
     fn track_modifier(&mut self, vk: u16, down: bool) {
@@ -745,7 +447,7 @@ impl App {
     /// Enter/leave borderless fullscreen (F11).
     fn set_fullscreen(&mut self, on: bool) {
         if let Some(w) = &self.window {
-            w.set_fullscreen(on.then(|| Fullscreen::Borderless(None)));
+            w.set_fullscreen(on.then_some(Fullscreen::Borderless(None)));
             self.fullscreen = on;
         }
     }
@@ -770,6 +472,13 @@ impl App {
     }
 }
 
+/// Split accumulated motion into the whole steps to send now and the fraction
+/// to carry into the next event.
+fn take_whole(acc: f64) -> (i16, f64) {
+    let whole = acc.trunc().clamp(i16::MIN as f64, i16::MAX as f64);
+    (whole as i16, acc - whole)
+}
+
 impl ApplicationHandler<AppEvent> for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -777,10 +486,7 @@ impl ApplicationHandler<AppEvent> for App {
         }
         // Start fullscreen by default (like Moonlight); STARFIRE_FULLSCREEN=0 to
         // start windowed. F11 toggles either way.
-        let start_fs = !matches!(
-            env("STARFIRE_FULLSCREEN").as_deref(),
-            Some("0") | Some("off") | Some("false") | Some("no")
-        );
+        let start_fs = env_on("STARFIRE_FULLSCREEN");
         let mut attrs = Window::default_attributes().with_title("Starfire");
         if start_fs {
             attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(None)));
@@ -796,11 +502,11 @@ impl ApplicationHandler<AppEvent> for App {
         self.fullscreen = start_fs;
         let size = window.inner_size();
         let (w, h) = (size.width.max(1), size.height.max(1));
-        // Windows zero-copy: the D3D11 renderer on the shared decode device; else
-        // the portable wgpu renderer.
+        // Windows zero-copy: the D3D11 renderer on the client's decode device;
+        // else the portable wgpu renderer.
         #[cfg(target_os = "windows")]
-        let made = match &self.shared {
-            Some(dev) => starfire_render::new_d3d11_for_window(&window, dev.clone(), w, h),
+        let made = match self.client.as_ref().and_then(|c| c.shared_device()) {
+            Some(dev) => starfire_render::new_d3d11_for_window(&window, dev, w, h),
             None => new_for_window(window.clone(), w, h),
         };
         #[cfg(not(target_os = "windows"))]
@@ -834,6 +540,13 @@ impl ApplicationHandler<AppEvent> for App {
                 eprintln!("[starfire] session stopped: {msg}");
                 el.exit();
             }
+            AppEvent::Tick => {
+                if let Some(c) = &self.client {
+                    if self.reporter.tick(c) {
+                        el.exit();
+                    }
+                }
+            }
         }
     }
 
@@ -848,8 +561,14 @@ impl ApplicationHandler<AppEvent> for App {
             WindowEvent::RedrawRequested => {
                 if let (Some(r), Ok(slot)) = (self.renderer.as_mut(), self.latest.lock()) {
                     if let Some(frame) = slot.as_ref() {
-                        if let Err(e) = r.present(frame) {
-                            eprintln!("[starfire] present error: {e}");
+                        match r.present(frame) {
+                            // Close the frame's timeline: decoded → presented.
+                            Ok(()) => {
+                                if let Some(c) = &self.client {
+                                    c.frame_presented(frame.pts);
+                                }
+                            }
+                            Err(e) => eprintln!("[starfire] present error: {e}"),
                         }
                     }
                 }
@@ -915,8 +634,14 @@ impl ApplicationHandler<AppEvent> for App {
     fn device_event(&mut self, _el: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
         // Raw relative motion — the FPS aim path. Only when the pointer is grabbed.
         if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
-            if self.grabbed && (dx != 0.0 || dy != 0.0) {
-                self.send(input::mouse_move_rel(dx as i16, dy as i16));
+            if !self.grabbed {
+                return;
+            }
+            let (ix, rx) = take_whole(self.rel_remainder.0 + dx);
+            let (iy, ry) = take_whole(self.rel_remainder.1 + dy);
+            self.rel_remainder = (rx, ry);
+            if ix != 0 || iy != 0 {
+                self.send(input::mouse_move_rel(ix, iy));
             }
         }
     }
@@ -967,12 +692,35 @@ fn vk_from_keycode(code: KeyCode) -> Option<u16> {
     })
 }
 
+/// Headless mode: run the full pair → stream → reassemble → decode pipeline and
+/// report, with no window (so no input source and no present). Validates
+/// hardware decode over an SSH session where a GPU window can't be created.
+fn run_headless(cfg: StarfireConfig) {
+    let mut client = Client::connect(cfg);
+    start_audio(&mut client);
+    let mut reporter = Reporter::from_env();
+    loop {
+        match client.poll_event() {
+            Some(ClientEvent::Stopped(m)) => {
+                eprintln!("[starfire] stopped: {m}");
+                break;
+            }
+            Some(ClientEvent::Frame) => continue, // drain promptly, then tick
+            None => thread::sleep(Duration::from_millis(5)),
+        }
+        if reporter.tick(&client) {
+            break;
+        }
+    }
+    client.stop(); // tells the host to end the session before we exit
+}
+
 // Top-level init failures (event loop / GPU) are fatal and worth a panic.
 #[allow(clippy::expect_used)]
 fn main() {
     keep_awake(); // never let App Nap / display sleep throttle the stream
 
-    // #6: request this display's native refresh unless the operator pinned it.
+    // Request this display's native refresh unless the operator pinned it.
     if env("STARFIRE_FPS").is_none() {
         if let Some(hz) = display_refresh_hz() {
             eprintln!("[starfire] display {hz} Hz → requesting {hz} fps (STARFIRE_FPS overrides)");
@@ -980,69 +728,117 @@ fn main() {
         }
     }
 
-    let latest: Arc<Mutex<Option<VideoFrame>>> = Arc::new(Mutex::new(None));
-    // Captured input (main/winit thread) -> network thread -> control channel.
-    let (input_tx, input_rx) = std::sync::mpsc::channel::<Vec<u8>>();
-
-    // One D3D11 device shared by the decoder + the D3D11 renderer (Windows
-    // zero-copy). Created up front so it exists before both. `STARFIRE_ZEROCOPY=0`
-    // (or device-create failure) falls back to the portable wgpu path.
-    #[cfg(target_os = "windows")]
-    let shared: Shared = {
-        let zc = !matches!(
-            env("STARFIRE_ZEROCOPY").as_deref(),
-            Some("0") | Some("off") | Some("false") | Some("no")
-        );
-        if zc {
-            starfire_decode::win_device::SharedDevice::create().ok()
-        } else {
-            None
+    let cfg = match config_from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[starfire] {e}");
+            std::process::exit(2);
         }
     };
-    #[cfg(not(target_os = "windows"))]
-    let shared: Shared = ();
+    eprintln!(
+        "[starfire] connecting to {} — {:?} @ {}x{}x{} {} kbps slices={} fec={}% pkt={}",
+        cfg.host,
+        cfg.app_name,
+        cfg.width,
+        cfg.height,
+        cfg.fps,
+        cfg.bitrate_kbps,
+        cfg.slices,
+        cfg.fec_percent,
+        cfg.packet_size,
+    );
 
-    // Headless mode: run the full pair → stream → depacketize → decode loop on
-    // this thread and log decoded frames — no window (no input source). Validates
-    // HW decode over a headless/SSH session where a GPU window can't be created.
+    // Pairing blocks until the PIN is entered on the host; submit it concurrently.
+    {
+        let (host, pin) = (cfg.host.clone(), cfg.pin.clone());
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(900));
+            submit_pin(&host, &pin);
+        });
+    }
+
     if env("STARFIRE_HEADLESS").is_some() {
-        run_session(
-            latest,
-            |e| {
-                if let AppEvent::Stopped(m) = e {
-                    eprintln!("[starfire] stopped: {m}");
-                }
-            },
-            input_rx,
-            shared,
-        );
+        run_headless(cfg);
         return;
     }
 
     let event_loop = EventLoop::<AppEvent>::with_user_event()
         .build()
         .expect("build event loop");
+
+    // The client wakes the event loop from its pipeline thread the instant a
+    // frame is decoded.
     let proxy = event_loop.create_proxy();
+    let mut client = Client::connect_with(cfg, move |ev| {
+        let _ = proxy.send_event(match ev {
+            ClientEvent::Frame => AppEvent::Frame,
+            ClientEvent::Stopped(m) => AppEvent::Stopped(m),
+        });
+    });
+    start_audio(&mut client);
+
+    // Periodic tick for the health line and the benchmark window.
     {
-        let latest = latest.clone();
-        let shared_net = shared.clone();
-        thread::spawn(move || {
-            run_session(latest, move |e| {
-                let _ = proxy.send_event(e);
-            }, input_rx, shared_net)
+        let proxy = event_loop.create_proxy();
+        thread::spawn(move || loop {
+            thread::sleep(Duration::from_millis(250));
+            if proxy.send_event(AppEvent::Tick).is_err() {
+                break; // the event loop is gone
+            }
         });
     }
 
     let mut app = App {
-        latest,
+        latest: client.latest(),
+        client: Some(client),
+        reporter: Reporter::from_env(),
         window: None,
         renderer: None,
-        input_tx,
         grabbed: false,
         modifiers: 0,
         fullscreen: false,
         stream_size: None,
-        shared,
+        rel_remainder: (0.0, 0.0),
     };
     event_loop.run_app(&mut app).expect("run event loop");
+
+    // Tear the session down properly so the host stops streaming.
+    if let Some(client) = app.client.take() {
+        client.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::take_whole;
+
+    /// Sub-pixel motion must add up instead of being rounded away: ten events
+    /// of 0.3 px are 3 px of travel, not zero.
+    #[test]
+    fn fractional_mouse_motion_accumulates() {
+        let (mut acc, mut sent) = (0.0f64, 0i32);
+        for _ in 0..10 {
+            let (whole, rest) = take_whole(acc + 0.3);
+            sent += whole as i32;
+            acc = rest;
+        }
+        assert_eq!(sent, 2, "2 whole pixels sent so far");
+        assert!(
+            (acc - 1.0).abs() < 1e-9 || acc < 1.0,
+            "remainder carried: {acc}"
+        );
+        let (whole, _) = take_whole(acc + 0.3);
+        assert_eq!(
+            sent + whole as i32,
+            3,
+            "the third pixel arrives with the next event"
+        );
+    }
+
+    #[test]
+    fn negative_and_large_motion_split_correctly() {
+        assert_eq!(take_whole(-2.75), (-2, -0.75));
+        assert_eq!(take_whole(0.99).0, 0);
+        assert_eq!(take_whole(1e9).0, i16::MAX, "clamped, never wraps");
+    }
 }

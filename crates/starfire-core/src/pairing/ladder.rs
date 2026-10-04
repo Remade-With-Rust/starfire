@@ -870,27 +870,30 @@ mod tests {
         let client = pair_and_finalize();
         let apps = client.applist().expect("applist");
         let desktop = apps.iter().find(|a| a.title == "Desktop").expect("Desktop");
-        let mut sess = StreamSession::start(
+        // Media datagrams are not needed here; keep the receiver alive so the
+        // session's receive threads keep the return path pinged.
+        let (events_tx, _events_rx) = std::sync::mpsc::channel();
+        let sess = StreamSession::start(
             client,
             &host,
             &desktop.id,
             &LaunchConfig::default(),
             &AnnounceConfig::default(),
+            events_tx,
         )
         .expect("session start");
+        let control = sess.control();
 
         std::thread::sleep(Duration::from_millis(400));
-        let mut buf = [0u8; 2048];
 
         // Keyboard FIRST (freshest control channel): type "HI", then Ctrl+A,
         // Ctrl+C, so the host clipboard ends up holding the typed text — a
         // definitive check (focus Notepad on the host before running).
         // VK: H=0x48 I=0x49 A=0x41 C=0x43; CTRL modifier bit = 0x02.
         for &(vk, modi) in &[(0x48u16, 0u8), (0x49, 0), (0x41, 0x02), (0x43, 0x02)] {
-            let _ = sess.send_input(&input::key(vk, modi, true));
+            control.send_input(input::key(vk, modi, true));
             std::thread::sleep(Duration::from_millis(45));
-            let _ = sess.send_input(&input::key(vk, modi, false));
-            let _ = sess.poll_video(&mut buf); // keepalive
+            control.send_input(input::key(vk, modi, false));
             std::thread::sleep(Duration::from_millis(90));
         }
         println!("INPUT: typed 'HI' + Ctrl+A + Ctrl+C — host clipboard should hold it");
@@ -899,10 +902,7 @@ mod tests {
         let start = Instant::now();
         let mut sent = 0u32;
         while start.elapsed() < Duration::from_secs(3) {
-            let _ = sess.poll_video(&mut buf);
-            if sess.send_input(&input::mouse_move_rel(10, 6)).is_err() {
-                break;
-            }
+            control.send_input(input::mouse_move_rel(10, 6));
             sent += 1;
             std::thread::sleep(Duration::from_millis(10));
         }

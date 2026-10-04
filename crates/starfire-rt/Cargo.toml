@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+# starfire-rt — real-time scheduling hints for the streaming threads, shared by
+# the Starfire client and the Comet host. A separate crate on purpose: it is the
+# one place that makes the (tiny, documented) OS scheduling calls, so the
+# protocol crates that use it stay free of `unsafe`.
+[package]
+name = "starfire-rt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Real-time thread scheduling hints for low-latency streaming threads (no dependencies)."
+
+[lints]
+workspace = true

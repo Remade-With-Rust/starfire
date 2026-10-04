@@ -41,101 +41,34 @@ pub struct AccessUnit {
     /// (so `value / 10.0` ms) — the encoder/capture latency on the host.
     pub host_latency_tenths_ms: u16,
     pub data: Vec<u8>,
+    /// How the frame arrived: timestamps and FEC accounting (instrumentation;
+    /// never needed to decode the frame).
+    pub meta: FrameMeta,
 }
 
-/// RTP depacketization — docs/protocol/07 §1. Parses RTP + the Sunshine-specific
-/// payload header. Layout derived from captured wire packets + the Sunshine
-/// *server* sender semantics (never the moonlight-common-c client struct).
-pub mod rtp {
-    /// `video_packet_raw_t` = RTP_PACKET(12) + reserved[4] + NV_VIDEO_PACKET.
-    /// Offsets are wire-derived (see the `dump_fixture_layout` test).
-    pub const RTP_HEADER_LEN: usize = 12;
-    pub const RESERVED_LEN: usize = 4;
-    pub const NV_OFFSET: usize = RTP_HEADER_LEN + RESERVED_LEN; // 16
-
-    pub const FLAG_PIC_DATA: u8 = 0x01;
-    pub const FLAG_EOF: u8 = 0x02;
-    pub const FLAG_SOF: u8 = 0x04;
-
-    /// Parsed video packet header (the fields needed to reassemble a frame).
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct VideoHeader {
-        /// RTP sequence number (big-endian on the wire).
-        pub rtp_seq: u16,
-        /// Monotonic frame counter.
-        pub frame_index: u32,
-        /// Per-packet stream index (host stores it `<< 8`).
-        pub stream_packet_index: u32,
-        /// NV flags: PIC_DATA | EOF | SOF.
-        pub flags: u8,
-        /// Shard index within the frame's FEC block (data shards first).
-        pub shard_index: u16,
-        /// Number of data shards in this frame's FEC block.
-        pub data_shards: u16,
-        /// FEC overhead percentage the host applied.
-        pub fec_percentage: u8,
-    }
-
-    impl VideoHeader {
-        pub fn is_sof(&self) -> bool {
-            self.flags & FLAG_SOF != 0
-        }
-        pub fn is_eof(&self) -> bool {
-            self.flags & FLAG_EOF != 0
-        }
-    }
-
-    /// NV_VIDEO_PACKET is 16 bytes; the coded payload follows at [`PAYLOAD_OFFSET`].
-    pub const NV_HEADER_LEN: usize = 16;
-    pub const PAYLOAD_OFFSET: usize = NV_OFFSET + NV_HEADER_LEN; // 32
-    /// SOF packets prefix an 8-byte `video_short_frame_header_t` before the NALs.
-    pub const SHORT_FRAME_HEADER_LEN: usize = 8;
-
-    // fecInfo bit layout (host: `fecInfo = x<<12 | data_shards<<22 | pct<<4`).
-    const FEC_PCT_SHIFT: u32 = 4;
-    const FEC_SHARD_SHIFT: u32 = 12;
-    const FEC_DATASHARDS_SHIFT: u32 = 22;
-    const FEC_10BIT: u32 = 0x3FF;
-    const FEC_8BIT: u32 = 0xFF;
-
-    fn le_u32(b: &[u8], at: usize) -> u32 {
-        u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
-    }
-
-    /// Parse the header of one received video datagram. `None` if too short.
-    pub fn parse_header(pkt: &[u8]) -> Option<VideoHeader> {
-        if pkt.len() < PAYLOAD_OFFSET {
-            return None;
-        }
-        let fec_info = le_u32(pkt, NV_OFFSET + 12);
-        Some(VideoHeader {
-            rtp_seq: u16::from_be_bytes([pkt[2], pkt[3]]),
-            stream_packet_index: le_u32(pkt, NV_OFFSET),
-            frame_index: le_u32(pkt, NV_OFFSET + 4),
-            flags: pkt[NV_OFFSET + 8],
-            shard_index: ((fec_info >> FEC_SHARD_SHIFT) & FEC_10BIT) as u16,
-            data_shards: ((fec_info >> FEC_DATASHARDS_SHIFT) & FEC_10BIT) as u16,
-            fec_percentage: ((fec_info >> FEC_PCT_SHIFT) & FEC_8BIT) as u8,
-        })
-    }
-
-    /// The frame type byte from a SOF packet's `video_short_frame_header_t`
-    /// (offset 3 in that header): 2 = IDR/keyframe, 1 = P, 4/5 = P variants.
-    pub fn sof_frame_type(pkt: &[u8]) -> Option<u8> {
-        let at = PAYLOAD_OFFSET + 3;
-        pkt.get(at).copied()
-    }
-
-    /// Offset of the coded payload (NALs) within a packet: after the NV header,
-    /// plus the short-frame header on SOF packets.
-    pub fn payload_offset(h: &VideoHeader) -> usize {
-        if h.is_sof() {
-            PAYLOAD_OFFSET + SHORT_FRAME_HEADER_LEN
-        } else {
-            PAYLOAD_OFFSET
-        }
-    }
+/// Arrival facts for one reassembled frame — the client's first two timeline
+/// points (`first_packet_at`, `complete_at`) plus what FEC had to do.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FrameMeta {
+    /// The host's 90 kHz capture timestamp for this frame (RTP timestamp).
+    pub rtp_timestamp: u32,
+    /// When the first packet of this frame reached us.
+    pub first_packet_at: Option<std::time::Instant>,
+    /// When the frame became decodable (last needed packet arrived).
+    pub complete_at: Option<std::time::Instant>,
+    /// Packets received for this frame before it completed.
+    pub packets: u16,
+    /// Data shards the frame is made of (across all FEC blocks).
+    pub data_shards: u16,
+    /// Data shards that were lost in transit and rebuilt from parity.
+    pub recovered_shards: u16,
+    /// FEC blocks the frame was split into (1 for all but very large frames).
+    pub fec_blocks: u8,
 }
+
+/// RTP depacketization — docs/protocol/07 §1. The packet header layout lives in
+/// the shared wire crate so the host writes exactly what the client parses.
+pub use starfire_protocol::video::rtp;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -347,330 +280,546 @@ mod fixture_tests {
 }
 
 /// Reed-Solomon FEC — docs/protocol/07 §2, the bit-exact core. The host
-/// (Sunshine) encodes parity with the `nanors` GF(2^8) Reed-Solomon library;
-/// recovery must use a matrix-compatible decoder or it silently corrupts frames.
-/// Geometry (from the Sunshine server FEC source): data shards `0..k-1` then
-/// parity `k..k+m-1`, all padded to a fixed blocksize; `m = ceil(k*pct/100)`
-/// (floored to a minimum), up to 4 independent FEC blocks per frame.
+/// (Sunshine) encodes parity with a systematic Cauchy code over GF(2^8);
+/// recovery must use the same matrix or it silently corrupts frames.
+///
+/// The implementation lives in the shared wire crate
+/// ([`starfire_protocol::fec`]) so the client's recovery and the host's parity
+/// generation are one piece of code; this module is the client-facing name.
 pub mod fec {
-    use std::sync::OnceLock;
+    pub use starfire_protocol::fec::{parity_count, scalar, Fec, MAX_BLOCK_SHARDS};
 
-    /// GF(2^8) with primitive polynomial `0x11d` and generator `2` — matches the
-    /// `nanors` library Sunshine encodes with, so recovery is byte-compatible.
-    struct Gf256 {
-        /// `exp[i] = g^i` (doubled to 512 so `log[a]+log[b]` never wraps).
-        exp: [u8; 512],
-        log: [u8; 256],
-        /// Multiplicative inverse table (`inv[0]` unused).
-        inv: [u8; 256],
-    }
-
-    impl Gf256 {
-        fn build() -> Self {
-            let mut exp = [0u8; 512];
-            let mut log = [0u8; 256];
-            let mut x: u16 = 1;
-            for (i, slot) in exp.iter_mut().take(255).enumerate() {
-                *slot = x as u8;
-                log[x as usize] = i as u8;
-                x <<= 1;
-                if x & 0x100 != 0 {
-                    x ^= 0x11d;
-                }
-            }
-            for i in 255..512 {
-                exp[i] = exp[i - 255];
-            }
-            let mut inv = [0u8; 256];
-            for a in 1..256usize {
-                inv[a] = exp[255 - log[a] as usize];
-            }
-            Self { exp, log, inv }
-        }
-
-        #[inline]
-        fn mul(&self, a: u8, b: u8) -> u8 {
-            if a == 0 || b == 0 {
-                0
-            } else {
-                self.exp[self.log[a as usize] as usize + self.log[b as usize] as usize]
-            }
-        }
-
-        #[inline]
-        fn inverse(&self, a: u8) -> u8 {
-            self.inv[a as usize]
-        }
-    }
-
-    fn gf() -> &'static Gf256 {
-        static GF: OnceLock<Gf256> = OnceLock::new();
-        GF.get_or_init(Gf256::build)
-    }
-
-    /// Cauchy parity coefficient for parity row `j`, data column `i`:
-    /// `1 / ((parity_shards + i) XOR j)` in GF(2^8). [matches `nanors` rs_new:
-    /// `GF2_8_INV[(ps + i) ^ j]`].
-    fn parity_coeff(parity_shards: usize, i: usize, j: usize) -> u8 {
-        gf().inverse(((parity_shards + i) ^ j) as u8)
-    }
-
-    /// Invert a `k×k` GF(2^8) matrix (row-major) in place via Gauss-Jordan.
-    /// Returns `false` if singular.
-    fn invert(m: &mut [u8], k: usize) -> bool {
-        let g = gf();
-        let mut inv = vec![0u8; k * k];
-        for i in 0..k {
-            inv[i * k + i] = 1;
-        }
-        for col in 0..k {
-            let mut piv = col;
-            while piv < k && m[piv * k + col] == 0 {
-                piv += 1;
-            }
-            if piv == k {
-                return false; // singular
-            }
-            if piv != col {
-                for c in 0..k {
-                    m.swap(piv * k + c, col * k + c);
-                    inv.swap(piv * k + c, col * k + c);
-                }
-            }
-            let pvi = g.inverse(m[col * k + col]);
-            for c in 0..k {
-                m[col * k + c] = g.mul(m[col * k + c], pvi);
-                inv[col * k + c] = g.mul(inv[col * k + c], pvi);
-            }
-            for r in 0..k {
-                if r == col {
-                    continue;
-                }
-                let f = m[r * k + col];
-                if f == 0 {
-                    continue;
-                }
-                for c in 0..k {
-                    m[r * k + c] ^= g.mul(f, m[col * k + c]);
-                    inv[r * k + c] ^= g.mul(f, inv[col * k + c]);
-                }
-            }
-        }
-        m.copy_from_slice(&inv);
-        true
-    }
-
-    /// Recover missing data shards in one FEC block from the parity shards,
-    /// byte-compatible with Sunshine's `nanors` systematic Cauchy RS code.
-    /// `shards` has `data_shards + parity_shards` slots (`None` = lost); all
-    /// present shards must be the same byte length. On success every data-shard
-    /// slot is filled with the host's real bytes. Returns `false` if fewer than
-    /// `data_shards` shards are present (unrecoverable) or the matrix is singular.
-    ///
-    /// Only runs on actual loss; the no-loss reassembly path never calls it.
+    /// One-shot recovery of the missing data shards in one FEC block (see
+    /// [`Fec::recover`]). Builds a fresh coder each call — fine for tests and
+    /// one-offs; the [`Depacketizer`](super::reassembly::Depacketizer) keeps its
+    /// own [`Fec`] so steady-state recovery reuses the expanded tables.
     pub fn recover(
         data_shards: usize,
         parity_shards: usize,
         shards: &mut [Option<Vec<u8>>],
     ) -> bool {
-        let k = data_shards;
-        if shards.len() < k + parity_shards || shards.iter().filter(|s| s.is_some()).count() < k {
-            return false;
-        }
-        if (0..k).all(|i| shards[i].is_some()) {
-            return true; // all data shards already present
-        }
-        let len = match shards.iter().flatten().next() {
-            Some(s) => s.len(),
-            None => return false,
-        };
-
-        // The k surviving rows of the systematic generator F = [I_k ; Cauchy].
-        let rows: Vec<usize> = shards
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.is_some())
-            .map(|(i, _)| i)
-            .take(k)
-            .collect();
-        let present: Vec<Vec<u8>> = rows.iter().filter_map(|&r| shards[r].clone()).collect();
-
-        // Build M = F[rows] (k×k): data rows are identity, parity rows are Cauchy.
-        let mut mat = vec![0u8; k * k];
-        for (r, &sh) in rows.iter().enumerate() {
-            if sh < k {
-                mat[r * k + sh] = 1;
-            } else {
-                let j = sh - k;
-                for (c, slot) in mat[r * k..r * k + k].iter_mut().enumerate() {
-                    *slot = parity_coeff(parity_shards, c, j);
-                }
-            }
-        }
-        if !invert(&mut mat, k) {
-            return false;
-        }
-
-        // data = M⁻¹ · present (per byte), filling only the missing data shards.
-        let g = gf();
-        for d in 0..k {
-            if shards[d].is_some() {
-                continue;
-            }
-            let mut out = vec![0u8; len];
-            for (r, src) in present.iter().enumerate() {
-                let coeff = mat[d * k + r];
-                if coeff == 0 {
-                    continue;
-                }
-                for (o, &s) in out.iter_mut().zip(src.iter()) {
-                    *o ^= g.mul(coeff, s);
-                }
-            }
-            shards[d] = Some(out);
-        }
-        true
+        Fec::new().recover(data_shards, parity_shards, shards)
     }
 }
 
-/// Frame reassembly — docs/protocol/07 §3. Reorders fragments by shard index,
-/// assembles frames, and emits a complete [`AccessUnit`]. FEC recovery for
-/// missing data shards is layered on top in [`super::fec`].
+/// Frame reassembly — docs/protocol/07 §3. Slots shards by index into a short
+/// window of in-flight frames, recovers lost data shards with FEC, and emits
+/// complete [`AccessUnit`]s strictly in frame order.
 pub mod reassembly {
-    use super::rtp::{self, FLAG_PIC_DATA};
-    use super::{AccessUnit, Codec};
+    use std::collections::VecDeque;
+    use std::time::Instant;
 
-    /// HEVC frame type 2 = IDR (keyframe), from the SOF short-frame header.
+    use super::fec::{Fec, MAX_BLOCK_SHARDS};
+    use super::rtp::{self, VideoHeader, FLAG_PIC_DATA};
+    use super::{AccessUnit, Codec, FrameMeta};
+
+    /// HEVC/H.264 frame type 2 = IDR (keyframe), from the short-frame header.
     const FRAME_TYPE_IDR: u8 = 2;
 
-    /// Streaming reassembler. Feed every received video datagram via [`push`];
-    /// it yields an [`AccessUnit`] when a frame is recoverable (all data shards
-    /// present, or enough data+parity shards to FEC-recover the missing ones).
-    ///
-    /// Perf: shard payloads are sliced (`bytes[32..]`) and slotted directly by
-    /// shard index — no hot-path sort. FEC (the per-byte GF(2^8) matrix solve)
-    /// runs only on actual loss; the clean path never touches it.
-    ///
-    /// Note: assumes a single FEC block per frame (`multiFecBlocks == 0`), which
-    /// holds for Sunshine up to ~255 shards/frame. Multi-block frames are a TODO.
-    ///
-    /// [`push`]: Depacketizer::push
-    pub struct Depacketizer {
-        codec: Codec,
-        frame_index: Option<u32>,
+    /// Frames that may be in flight at once. Packets of frame N+1 routinely
+    /// overtake the tail of frame N on Wi-Fi, so the frame being assembled must
+    /// not be the only one we remember; four is far more than reordering needs
+    /// and bounds memory when a burst leaves several frames incomplete.
+    const WINDOW_FRAMES: usize = 4;
+
+    /// A frame index this far *behind* the newest delivered frame is not a late
+    /// packet — the host restarted its counter. Reset and resynchronise.
+    const RESTART_DISTANCE: u32 = 600;
+
+    /// Recycled shard buffers kept for reuse (bounds the pool's memory).
+    const POOL_LIMIT: usize = 1024;
+
+    /// A FEC block may hold up to four independent blocks per frame (2-bit index).
+    const MAX_BLOCKS: usize = 4;
+
+    /// `a` is a later frame than `b` (wrap-safe).
+    fn newer(a: u32, b: u32) -> bool {
+        a != b && a.wrapping_sub(b) < 0x8000_0000
+    }
+
+    /// Running totals for one stream. All counts are exact, so they answer
+    /// "what did the link do?" without a clock.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct ReassemblyStats {
+        /// Video packets accepted into a frame.
+        pub packets: u64,
+        /// Frames handed to the decoder.
+        pub frames_delivered: u64,
+        /// Delivered frames that needed FEC to complete.
+        pub frames_recovered: u64,
+        /// Data shards rebuilt from parity.
+        pub shards_recovered: u64,
+        /// Frames that could not be completed (declared lost).
+        pub frames_lost: u64,
+        /// Complete frames withheld because they depend on a lost frame.
+        pub frames_skipped: u64,
+        /// Packets for frames already delivered or given up on. On a clean
+        /// link this is mostly parity arriving after its frame was complete
+        /// (the frame is delivered the moment enough shards are in), so it runs
+        /// at about the FEC percentage and is not a sign of trouble.
+        pub late_packets: u64,
+        /// Packets repeating a shard we already hold.
+        pub duplicate_packets: u64,
+        /// Packets whose header was inconsistent with their frame.
+        pub malformed_packets: u64,
+    }
+
+    /// A run of consecutive frames that were lost in transit.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct LossEvent {
+        pub first_frame: u32,
+        pub last_frame: u32,
+    }
+
+    impl LossEvent {
+        /// Number of frames in the lost run.
+        pub fn frames(&self) -> u32 {
+            self.last_frame
+                .wrapping_sub(self.first_frame)
+                .wrapping_add(1)
+        }
+    }
+
+    /// One FEC block of a frame in flight.
+    #[derive(Default)]
+    struct Block {
+        /// 0 until the first packet of this block arrives.
         data_shards: usize,
         parity_shards: usize,
-        /// Per-shard payload (`bytes[32..]`), data `0..k` then parity `k..k+m`.
+        fec_percentage: u8,
+        /// Shard payloads (`bytes[32..]`), data `0..k` then parity `k..k+m`.
         shards: Vec<Option<Vec<u8>>>,
-        /// Total shards received (data + parity).
         received: usize,
-        /// Data shards received (drives the no-loss fast path).
         received_data: usize,
-        /// Set once the frame has been emitted, to ignore trailing packets.
-        emitted: bool,
+    }
+
+    impl Block {
+        fn known(&self) -> bool {
+            self.data_shards != 0
+        }
+        /// Any `data_shards` of the block's shards reconstruct it.
+        fn complete(&self) -> bool {
+            self.known() && self.received >= self.data_shards
+        }
+    }
+
+    /// A frame being assembled.
+    struct Partial {
+        frame_index: u32,
+        blocks: Vec<Block>,
+        first_packet_at: Instant,
+        rtp_timestamp: u32,
+        packets: u16,
+    }
+
+    impl Partial {
+        fn complete(&self) -> bool {
+            self.blocks.iter().all(Block::complete)
+        }
+    }
+
+    /// Streaming reassembler. Feed every received video datagram via
+    /// [`push`](Depacketizer::push); it yields an [`AccessUnit`] the moment a
+    /// frame is recoverable (all data shards present, or enough data + parity
+    /// to rebuild the missing ones).
+    ///
+    /// Guarantees:
+    /// * **Order.** Frames come out in increasing frame index. A frame that is
+    ///   still incomplete when a later one completes is declared lost — its
+    ///   packets were sent a whole frame interval earlier, so they are not
+    ///   coming — and reported through [`take_loss`](Depacketizer::take_loss).
+    /// * **Reorder tolerance.** Packets of the next frame may overtake the tail
+    ///   of the current one, and stale packets of old frames are ignored; neither
+    ///   disturbs a frame in progress.
+    /// * **No steady-state allocation per packet.** Shard buffers are recycled.
+    ///
+    /// With the keyframe gate on ([`gate_on_keyframes`](Depacketizer::gate_on_keyframes))
+    /// it also withholds frames that depend on a lost one, so the decoder is
+    /// never handed a frame whose reference is missing; delivery resumes at the
+    /// next keyframe.
+    pub struct Depacketizer {
+        codec: Codec,
+        /// In-flight frames, oldest first.
+        window: VecDeque<Partial>,
+        /// Newest frame index delivered or given up on; older packets are late.
+        floor: Option<u32>,
+        gate: bool,
+        awaiting_keyframe: bool,
+        pending_loss: Option<LossEvent>,
+        fec: Fec,
+        pool: Vec<Vec<u8>>,
+        stats: ReassemblyStats,
     }
 
     impl Depacketizer {
+        /// A pure reassembler: every complete frame is delivered.
         pub fn new(codec: Codec) -> Self {
             Self {
                 codec,
-                frame_index: None,
-                data_shards: 0,
-                parity_shards: 0,
-                shards: Vec::new(),
-                received: 0,
-                received_data: 0,
-                emitted: false,
+                window: VecDeque::with_capacity(WINDOW_FRAMES + 1),
+                floor: None,
+                gate: false,
+                awaiting_keyframe: false,
+                pending_loss: None,
+                fec: Fec::new(),
+                pool: Vec::new(),
+                stats: ReassemblyStats::default(),
             }
         }
 
-        fn reset_for(&mut self, frame_index: u32, data_shards: usize, parity_shards: usize) {
-            self.frame_index = Some(frame_index);
-            self.data_shards = data_shards;
-            self.parity_shards = parity_shards;
-            self.shards.clear();
-            self.shards.resize(data_shards + parity_shards, None);
-            self.received = 0;
-            self.received_data = 0;
-            self.emitted = false;
+        /// Turn the keyframe gate on or off (off by default). With it on, the
+        /// stream starts at the first keyframe, and after any lost frame nothing
+        /// is delivered until the next keyframe — what a player wants, since a
+        /// predicted frame without its reference decodes to garbage.
+        pub fn gate_on_keyframes(mut self, on: bool) -> Self {
+            self.gate = on;
+            self.awaiting_keyframe = on;
+            self
         }
 
-        /// Feed one received datagram. Returns a completed [`AccessUnit`] as soon
-        /// as the frame is recoverable. Late/duplicate, non-picture, or
-        /// already-emitted-frame packets return `None`.
+        /// Totals since the stream began.
+        pub fn stats(&self) -> ReassemblyStats {
+            self.stats
+        }
+
+        /// The FEC engine's reach counters (fast path vs scalar fallback).
+        pub fn fec_blocks(&self) -> (u64, u64) {
+            (self.fec.fast_blocks, self.fec.fallback_blocks)
+        }
+
+        /// The most recent run of lost frames, once. Call after each
+        /// [`push`](Depacketizer::push); a `Some` means the host should be asked
+        /// to recover (IDR / reference invalidation) right away.
+        pub fn take_loss(&mut self) -> Option<LossEvent> {
+            self.pending_loss.take()
+        }
+
+        /// True while the keyframe gate is closed (frames are being withheld
+        /// until a keyframe arrives). The caller should keep asking for one.
+        pub fn awaiting_keyframe(&self) -> bool {
+            self.awaiting_keyframe
+        }
+
+        /// Close the keyframe gate from outside: the decoder has lost its
+        /// references (it failed on frames that arrived intact), so stop feeding
+        /// it predicted frames until a keyframe arrives. No-op with the gate off.
+        pub fn require_keyframe(&mut self) {
+            if self.gate {
+                self.awaiting_keyframe = true;
+            }
+        }
+
+        /// Feed one received datagram, stamped with the current time.
         pub fn push(&mut self, pkt: &[u8]) -> Option<AccessUnit> {
+            self.push_at(pkt, Instant::now())
+        }
+
+        /// Feed one received datagram that arrived at `now`. Returns a completed
+        /// [`AccessUnit`] as soon as its frame is recoverable; late, duplicate,
+        /// malformed or non-picture packets return `None`.
+        pub fn push_at(&mut self, pkt: &[u8], now: Instant) -> Option<AccessUnit> {
             let h = rtp::parse_header(pkt)?;
-            if h.flags & FLAG_PIC_DATA == 0 || h.data_shards == 0 {
+            if h.data_shards == 0 {
+                return None; // not a picture packet
+            }
+            // A data shard states PIC_DATA explicitly. A parity shard's `flags`
+            // byte is not meaningful (Sunshine leaves it as coded bytes; only
+            // frameIndex and fecInfo are set), so accept parity on its index.
+            if !h.is_parity() && h.flags & FLAG_PIC_DATA == 0 {
                 return None;
             }
-            if self.frame_index != Some(h.frame_index) {
-                // parity = ceil(data*pct/100); the host encodes the final pct so
-                // this also recovers the min-floored count. (See Sunshine FEC.)
-                let parity = (h.data_shards as usize * h.fec_percentage as usize).div_ceil(100);
-                self.reset_for(h.frame_index, h.data_shards as usize, parity);
-            }
-            if self.emitted {
-                return None; // trailing shard of a frame we already delivered
-            }
-            let slot = h.shard_index as usize;
-            if slot < self.shards.len() && self.shards[slot].is_none() {
-                self.shards[slot] = Some(pkt[rtp::PAYLOAD_OFFSET..].to_vec());
-                self.received += 1;
-                if slot < self.data_shards {
-                    self.received_data += 1;
-                }
-            }
-            // `data_shards` shards (any mix) are enough to reconstruct the frame.
-            if self.received >= self.data_shards {
-                return self.finalize();
-            }
-            None
-        }
-
-        fn finalize(&mut self) -> Option<AccessUnit> {
-            // Recover missing data shards from parity if needed (loss path only).
-            if self.received_data < self.data_shards
-                && !super::fec::recover(self.data_shards, self.parity_shards, &mut self.shards)
+            let (k, m) = (h.data_shards as usize, h.parity_shards());
+            let (block, last_block) = (h.fec_block as usize, h.fec_last_block as usize);
+            if h.shard_index as usize >= k + m
+                || (m > 0 && k + m > MAX_BLOCK_SHARDS)
+                || block > last_block
+                || last_block >= MAX_BLOCKS
             {
-                return None; // not yet recoverable; retry as more shards arrive
+                self.stats.malformed_packets += 1;
+                return None;
             }
 
-            // The frame header lives at the front of shard 0 (now guaranteed
-            // present, possibly via FEC) — robust to losing the SOF packet.
-            let s0 = self.shards[0].as_ref()?;
-            let is_keyframe = s0.get(3).copied() == Some(FRAME_TYPE_IDR);
-            // video_short_frame_header_t.frame_processing_latency (LE u16 @ +1).
-            let host_latency = s0
-                .get(1..3)
-                .map(|b| u16::from_le_bytes([b[0], b[1]]))
-                .unwrap_or(0);
-            let last_payload_len = s0
-                .get(4..6)
-                .map(|b| u16::from_le_bytes([b[0], b[1]]) as usize);
-
-            let mut data = Vec::with_capacity(self.data_shards * 1376);
-            for i in 0..self.data_shards {
-                let bytes = self.shards[i].as_ref()?;
-                if i + 1 == self.data_shards {
-                    if let Some(n) = last_payload_len {
-                        data.extend_from_slice(&bytes[..n.min(bytes.len())]);
-                        continue;
+            if let Some(floor) = self.floor {
+                if !newer(h.frame_index, floor) {
+                    if floor.wrapping_sub(h.frame_index) > RESTART_DISTANCE {
+                        self.restart(); // the host reset its frame counter
+                    } else {
+                        self.stats.late_packets += 1;
+                        return None;
                     }
                 }
-                data.extend_from_slice(bytes);
             }
-            // Strip the 8-byte short-frame header that prefixes shard 0's data.
-            if data.len() >= rtp::SHORT_FRAME_HEADER_LEN {
-                data.drain(..rtp::SHORT_FRAME_HEADER_LEN);
+
+            let Some(pos) = self.slot_for(&h, now) else {
+                self.stats.late_packets += 1;
+                return None;
+            };
+            let frame = &mut self.window[pos];
+            if frame.blocks.len() != last_block + 1 {
+                self.stats.malformed_packets += 1;
+                return None;
             }
-            self.emitted = true;
+            let blk = &mut frame.blocks[block];
+            if !blk.known() {
+                blk.data_shards = k;
+                blk.parity_shards = m;
+                blk.fec_percentage = h.fec_percentage;
+                blk.shards.resize_with(k + m, || None);
+            } else if blk.data_shards != k || blk.fec_percentage != h.fec_percentage {
+                self.stats.malformed_packets += 1;
+                return None;
+            }
+            let slot = h.shard_index as usize;
+            if blk.shards[slot].is_some() {
+                self.stats.duplicate_packets += 1;
+                return None;
+            }
+            let mut buf = self.pool.pop().unwrap_or_default();
+            buf.clear();
+            buf.extend_from_slice(&pkt[rtp::PAYLOAD_OFFSET..]);
+            blk.shards[slot] = Some(buf);
+            blk.received += 1;
+            if slot < k {
+                blk.received_data += 1;
+            }
+            frame.packets = frame.packets.saturating_add(1);
+            self.stats.packets += 1;
+
+            if self.window[pos].complete() {
+                self.finish(pos, now)
+            } else {
+                None
+            }
+        }
+
+        /// Index in the window of the frame this packet belongs to, creating it
+        /// if needed. When the window is full the oldest in-flight frame is
+        /// given up to make room; a packet for a frame older than everything in
+        /// a full window is stale and gets `None`.
+        fn slot_for(&mut self, h: &VideoHeader, now: Instant) -> Option<usize> {
+            if let Some(pos) = self
+                .window
+                .iter()
+                .position(|f| f.frame_index == h.frame_index)
+            {
+                return Some(pos);
+            }
+            if self.window.len() >= WINDOW_FRAMES {
+                let oldest = self.window.front()?.frame_index;
+                if !newer(h.frame_index, oldest) {
+                    return None;
+                }
+                // Overtaken by a full window of newer frames and still not
+                // complete: its packets are not coming.
+                if let Some(old) = self.window.pop_front() {
+                    self.recycle(old);
+                }
+                self.give_up_through(oldest);
+            }
+            let mut blocks = Vec::with_capacity(h.fec_last_block as usize + 1);
+            blocks.resize_with(h.fec_last_block as usize + 1, Block::default);
+            let partial = Partial {
+                frame_index: h.frame_index,
+                blocks,
+                first_packet_at: now,
+                rtp_timestamp: h.rtp_timestamp,
+                packets: 0,
+            };
+            let pos = self
+                .window
+                .iter()
+                .position(|f| newer(f.frame_index, h.frame_index))
+                .unwrap_or(self.window.len());
+            self.window.insert(pos, partial);
+            Some(pos)
+        }
+
+        /// Give up on every frame after the floor up to and including `index`
+        /// (they are lost), and move the floor there.
+        fn give_up_through(&mut self, index: u32) {
+            let first = match self.floor {
+                Some(floor) => floor.wrapping_add(1),
+                None => index,
+            };
+            self.declare_lost(first, index);
+            self.floor = Some(index);
+        }
+
+        /// The frame at `pos` is recoverable: retire everything older, rebuild
+        /// lost shards, and assemble its access unit.
+        fn finish(&mut self, pos: usize, now: Instant) -> Option<AccessUnit> {
+            let mut frame = self.window.remove(pos)?;
+            let index = frame.frame_index;
+
+            // Everything older than a completed frame is lost: frames still
+            // incomplete in the window, and frames that never produced a packet.
+            let mut first_in_window = None;
+            while self
+                .window
+                .front()
+                .is_some_and(|f| newer(index, f.frame_index))
+            {
+                if let Some(old) = self.window.pop_front() {
+                    first_in_window.get_or_insert(old.frame_index);
+                    self.recycle(old);
+                }
+            }
+            let first_lost = match self.floor {
+                Some(floor) => Some(floor.wrapping_add(1)),
+                None => first_in_window, // joined mid-stream: only count what we saw
+            };
+            if let Some(first) = first_lost {
+                if first != index {
+                    self.declare_lost(first, index.wrapping_sub(1));
+                }
+            }
+            self.floor = Some(index);
+
+            // Rebuild missing data shards from parity (loss path only).
+            let mut recovered = 0usize;
+            for blk in &mut frame.blocks {
+                if blk.received_data < blk.data_shards {
+                    let missing = blk.data_shards - blk.received_data;
+                    if !self
+                        .fec
+                        .recover(blk.data_shards, blk.parity_shards, &mut blk.shards)
+                    {
+                        self.recycle(frame);
+                        self.declare_lost(index, index);
+                        return None;
+                    }
+                    recovered += missing;
+                }
+            }
+
+            let au = self.assemble(&frame, recovered, now);
+            self.recycle(frame);
+            let au = match au {
+                Some(au) => au,
+                None => {
+                    self.stats.malformed_packets += 1;
+                    self.declare_lost(index, index);
+                    return None;
+                }
+            };
+
+            if self.awaiting_keyframe {
+                if au.is_keyframe {
+                    self.awaiting_keyframe = false;
+                } else {
+                    self.stats.frames_skipped += 1;
+                    return None;
+                }
+            }
+            self.stats.frames_delivered += 1;
+            if recovered > 0 {
+                self.stats.frames_recovered += 1;
+                self.stats.shards_recovered += recovered as u64;
+            }
+            Some(au)
+        }
+
+        /// Concatenate the frame's data shards (block 0 first) into one access
+        /// unit, dropping the 8-byte short-frame header and the final shard's
+        /// padding.
+        fn assemble(&self, frame: &Partial, recovered: usize, now: Instant) -> Option<AccessUnit> {
+            // The frame header lives at the front of block 0 / shard 0 (now
+            // guaranteed present, possibly via FEC) — robust to losing the SOF.
+            let s0 = frame.blocks.first()?.shards.first()?.as_ref()?;
+            if s0.len() < rtp::SHORT_FRAME_HEADER_LEN {
+                return None;
+            }
+            let is_keyframe = s0[3] == FRAME_TYPE_IDR;
+            // video_short_frame_header_t.frame_processing_latency (LE u16 @ +1).
+            let host_latency = u16::from_le_bytes([s0[1], s0[2]]);
+            // lastPayloadLen (LE u16 @ +4): real bytes in the final data shard.
+            let last_payload_len = u16::from_le_bytes([s0[4], s0[5]]) as usize;
+
+            let total_data: usize = frame.blocks.iter().map(|b| b.data_shards).sum();
+            let mut data = Vec::with_capacity(total_data * s0.len());
+            let last_block = frame.blocks.len() - 1;
+            for (b, blk) in frame.blocks.iter().enumerate() {
+                for i in 0..blk.data_shards {
+                    let bytes = blk.shards[i].as_ref()?;
+                    let first = b == 0 && i == 0;
+                    let last = b == last_block && i + 1 == blk.data_shards;
+                    let start = if first {
+                        rtp::SHORT_FRAME_HEADER_LEN
+                    } else {
+                        0
+                    };
+                    let end = if last && last_payload_len > 0 {
+                        last_payload_len.min(bytes.len())
+                    } else {
+                        bytes.len()
+                    };
+                    data.extend_from_slice(bytes.get(start..end.max(start))?);
+                }
+            }
             Some(AccessUnit {
                 codec: self.codec,
-                frame_index: self.frame_index.unwrap_or(0),
+                frame_index: frame.frame_index,
                 is_keyframe,
                 host_latency_tenths_ms: host_latency,
                 data,
+                meta: FrameMeta {
+                    rtp_timestamp: frame.rtp_timestamp,
+                    first_packet_at: Some(frame.first_packet_at),
+                    complete_at: Some(now),
+                    packets: frame.packets,
+                    data_shards: total_data.min(u16::MAX as usize) as u16,
+                    recovered_shards: recovered.min(u16::MAX as usize) as u16,
+                    fec_blocks: frame.blocks.len() as u8,
+                },
             })
+        }
+
+        /// Record `first..=last` as lost and close the keyframe gate.
+        fn declare_lost(&mut self, first: u32, last: u32) {
+            let run = LossEvent {
+                first_frame: first,
+                last_frame: last,
+            };
+            self.stats.frames_lost += run.frames() as u64;
+            // Merge with an unread event so the caller sees one range.
+            self.pending_loss = Some(match self.pending_loss {
+                Some(prev) => LossEvent {
+                    first_frame: prev.first_frame,
+                    last_frame: last,
+                },
+                None => run,
+            });
+            if self.gate {
+                self.awaiting_keyframe = true;
+            }
+        }
+
+        /// Return a retired frame's shard buffers to the pool.
+        fn recycle(&mut self, frame: Partial) {
+            for blk in frame.blocks {
+                for buf in blk.shards.into_iter().flatten() {
+                    if self.pool.len() < POOL_LIMIT {
+                        self.pool.push(buf);
+                    }
+                }
+            }
+        }
+
+        /// Forget all in-flight state (the host restarted its frame counter).
+        fn restart(&mut self) {
+            while let Some(f) = self.window.pop_front() {
+                self.recycle(f);
+            }
+            self.floor = None;
+            self.awaiting_keyframe = self.gate;
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+pub(crate) mod testwire;
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod reassembly_tests;

@@ -18,14 +18,22 @@
 //! 3. Each AU's slice NALs (length-prefixed, see [`crate::annexb`]) become a
 //!    `CMBlockBuffer` → `CMSampleBuffer`, fed to
 //!    `VTDecompressionSessionDecodeFrame`.
-//! 4. The decompression callback receives a `CVPixelBuffer`; we lock it, copy
-//!    both planes into a portable [`VideoFrame`], and queue it for [`Decoder::push`]
-//!    to return.
+//! 4. The decompression callback receives a `CVPixelBuffer` and queues it as a
+//!    [`VideoFrame`] for [`Decoder::push`] to return: retained as-is for the
+//!    Metal renderer (zero-copy, the default) or copied into CPU planes
+//!    (`STARFIRE_ZEROCOPY=0`).
 //!
-//! # Why a copy
-//! We copy the surface down to CPU [`VideoFrame`] so the renderer has one
-//! portable upload path across all platforms. Zero-copy IOSurface→wgpu import is
-//! a later optimization that can sit behind the same [`Decoder`] trait.
+//! # Latency: decode synchronously
+//! `VTDecompressionSessionDecodeFrame` is called **without**
+//! `kVTDecodeFrame_EnableAsynchronousDecompression`, so the output callback has
+//! run by the time it returns and [`Decoder::push`] hands back the frame it was
+//! just given. With the asynchronous flag the call returns before the frame is
+//! decoded; `push` then finds nothing (or the *previous* frame) in the sink and
+//! the picture sits there until the next access unit arrives -- one whole frame
+//! interval of added latency (16.7 ms at 60 fps), while the time spent inside
+//! `push` looks deceptively small because it only measures the submit.
+//! `STARFIRE_DECODE_ASYNC=1` restores that behaviour for A/B measurement with
+//! `examples/decode_fixture` (frames held after each push: 0 vs 1).
 //!
 //! This module compiles only on macOS. It is structured to be unit-tested on a
 //! Mac (the pure-Rust glue — parameter-set extraction, callback plumbing — is
@@ -341,6 +349,9 @@ pub struct VideoToolboxDecoder {
     /// instead of memcpy'ing its planes to the CPU. Read once from
     /// `STARFIRE_ZEROCOPY` (default on for macOS).
     zero_copy: bool,
+    /// Submit asynchronously (frames come back one `push` late). Off by default;
+    /// `STARFIRE_DECODE_ASYNC=1` turns it on as the A/B measurement baseline.
+    asynchronous: bool,
     /// Boxed so the callback's `refCon` pointer stays stable for the session's
     /// lifetime. Holds an `Arc` clone of `sink`.
     _callback_ctx: Box<CallbackCtx>,
@@ -371,6 +382,10 @@ impl VideoToolboxDecoder {
             std::env::var("STARFIRE_ZEROCOPY").ok().as_deref(),
             Some("0") | Some("false") | Some("off") | Some("no")
         );
+        let asynchronous = matches!(
+            std::env::var("STARFIRE_DECODE_ASYNC").ok().as_deref(),
+            Some("1") | Some("true") | Some("on") | Some("yes")
+        );
         let sink = Arc::new(Mutex::new(FrameSink::default()));
         Ok(Self {
             codec,
@@ -378,6 +393,7 @@ impl VideoToolboxDecoder {
             format_desc: ptr::null(),
             session: ptr::null(),
             zero_copy,
+            asynchronous,
             // The callback context is (re)bound to `sink` in `ensure_session`,
             // once the session that uses it actually exists.
             _callback_ctx: Box::new(CallbackCtx {
@@ -537,8 +553,13 @@ impl VideoToolboxDecoder {
             )));
         }
 
-        let flags = kVTDecodeFrame_EnableAsynchronousDecompression
-            | kVTDecodeFrame_EnableTemporalProcessing;
+        // Synchronous by default: with no flags the callback runs before this
+        // call returns, so the frame is in the sink when `push` drains it.
+        let flags = if self.asynchronous {
+            kVTDecodeFrame_EnableAsynchronousDecompression | kVTDecodeFrame_EnableTemporalProcessing
+        } else {
+            0
+        };
         let mut info_out: u32 = 0;
         let status = unsafe {
             VTDecompressionSessionDecodeFrame(
@@ -581,10 +602,15 @@ impl Decoder for VideoToolboxDecoder {
         }
         self.decode_sample(&sample, au.frame_index as i64)?;
 
-        // Pull whatever finished; VideoToolbox may deliver asynchronously, so a
-        // given push may return the previous frame or nothing yet.
-        let frames = self.drain_sink()?;
-        Ok(frames.into_iter().next())
+        // Synchronous decode: the frame submitted above is already in the sink.
+        // Return the NEWEST frame -- if several ever accumulate, showing an older
+        // one would leave the picture permanently behind.
+        let mut frames = self.drain_sink()?;
+        if self.asynchronous {
+            // A/B baseline: the pre-fix behaviour (oldest first, rest dropped).
+            return Ok(frames.into_iter().next());
+        }
+        Ok(frames.pop())
     }
 
     fn flush(&mut self) -> Result<Vec<VideoFrame>, DecodeError> {

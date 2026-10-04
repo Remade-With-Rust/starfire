@@ -60,6 +60,43 @@ pub fn mouse_move_rel(dx: i16, dy: i16) -> Vec<u8> {
     frame(MAGIC_MOUSE_MOVE_REL, &body)
 }
 
+/// Length of a relative-mouse-move message: type(2) + size(4) + magic(4) + dx(2) + dy(2).
+const MOUSE_REL_LEN: usize = 14;
+
+/// The `(dx, dy)` of an encoded relative mouse move, or `None` if `msg` is any
+/// other message.
+pub fn decode_mouse_rel(msg: &[u8]) -> Option<(i16, i16)> {
+    if msg.len() != MOUSE_REL_LEN
+        || msg[0..2] != CTRL_TYPE_INPUT.to_le_bytes()
+        || msg[2..6] != 8u32.to_be_bytes()
+        || msg[6..10] != MAGIC_MOUSE_MOVE_REL.to_le_bytes()
+    {
+        return None;
+    }
+    Some((
+        i16::from_be_bytes([msg[10], msg[11]]),
+        i16::from_be_bytes([msg[12], msg[13]]),
+    ))
+}
+
+/// Fold relative mouse move `next` into `prev` (summing the deltas) when both
+/// are relative moves and the sum still fits. Returns `true` if `prev` now
+/// carries both; `false` leaves `prev` untouched and the caller sends `next`
+/// separately. Used only when moves have **queued up** behind a stalled link:
+/// one message with the total motion replaces a backlog the host would have to
+/// replay one stale step at a time.
+pub fn merge_mouse_rel(prev: &mut [u8], next: &[u8]) -> bool {
+    let (Some((ax, ay)), Some((bx, by))) = (decode_mouse_rel(prev), decode_mouse_rel(next)) else {
+        return false;
+    };
+    let (Some(dx), Some(dy)) = (ax.checked_add(bx), ay.checked_add(by)) else {
+        return false;
+    };
+    prev[10..12].copy_from_slice(&dx.to_be_bytes());
+    prev[12..14].copy_from_slice(&dy.to_be_bytes());
+    true
+}
+
 /// Absolute mouse position within a `width`×`height` reference viewport.
 pub fn mouse_move_abs(x: i16, y: i16, width: i16, height: i16) -> Vec<u8> {
     let mut body = Vec::with_capacity(10);
@@ -127,6 +164,52 @@ mod tests {
                 0xff, 0xce, // dy = -50 (BE)
             ]
         );
+    }
+
+    #[test]
+    fn backlogged_relative_moves_fold_into_one() {
+        let mut a = mouse_move_rel(100, -50);
+        assert!(merge_mouse_rel(&mut a, &mouse_move_rel(-30, 20)));
+        assert_eq!(
+            a,
+            mouse_move_rel(70, -30),
+            "the merged message is a plain rel-move"
+        );
+        assert_eq!(decode_mouse_rel(&a), Some((70, -30)));
+    }
+
+    #[test]
+    fn merge_refuses_anything_that_is_not_two_relative_moves() {
+        // A click between two moves must stay between them: order is behaviour.
+        let mut mv = mouse_move_rel(5, 5);
+        let before = mv.clone();
+        assert!(!merge_mouse_rel(
+            &mut mv,
+            &mouse_button(MouseButton::Left, true)
+        ));
+        assert!(!merge_mouse_rel(&mut mv, &key(0x41, 0, true)));
+        assert!(!merge_mouse_rel(&mut mv, &mouse_move_abs(1, 2, 1920, 1080)));
+        assert!(!merge_mouse_rel(&mut mv, &scroll_vertical(120)));
+        assert_eq!(mv, before, "prev is untouched when the merge is refused");
+        let mut click = mouse_button(MouseButton::Left, true);
+        assert!(!merge_mouse_rel(&mut click, &mouse_move_rel(1, 1)));
+    }
+
+    #[test]
+    fn merge_refuses_a_sum_that_would_overflow() {
+        let mut a = mouse_move_rel(i16::MAX - 1, 0);
+        let before = a.clone();
+        assert!(
+            !merge_mouse_rel(&mut a, &mouse_move_rel(2, 0)),
+            "would wrap"
+        );
+        assert_eq!(a, before);
+        let mut b = mouse_move_rel(0, i16::MIN + 1);
+        assert!(!merge_mouse_rel(&mut b, &mouse_move_rel(0, -2)));
+        // Exactly at the limit is fine.
+        let mut c = mouse_move_rel(i16::MAX - 1, 0);
+        assert!(merge_mouse_rel(&mut c, &mouse_move_rel(1, 0)));
+        assert_eq!(decode_mouse_rel(&c), Some((i16::MAX, 0)));
     }
 
     #[test]

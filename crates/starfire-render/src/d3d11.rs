@@ -11,6 +11,11 @@
 //! ([`starfire_decode::win_device::SharedDevice`]). We create two SRVs over it
 //! (Y = R8, CbCr = R8G8), run a BT.709 shader, and present to a DXGI flip-model
 //! swapchain on the winit `HWND` — no CPU readback, no GPU re-upload.
+//!
+//! Normally that texture is the decoder's own output array and the frame names
+//! one slice of it, so nothing is copied between decode and the draw; the frame
+//! (and with it the decoder's sample) is held until two presents later so the
+//! decoder cannot overwrite a slice that is still being shown.
 
 use std::ffi::c_void;
 
@@ -19,17 +24,17 @@ use starfire_decode::VideoFrame;
 use windows::core::{s, Interface};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
-use windows::Win32::Graphics::Direct3D::D3D11_SRV_DIMENSION_TEXTURE2D;
+use windows::Win32::Graphics::Direct3D::ID3DBlob;
+use windows::Win32::Graphics::Direct3D::D3D11_SRV_DIMENSION_TEXTURE2DARRAY;
 use windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11DeviceContext, ID3D11PixelShader, ID3D11RenderTargetView,
     ID3D11SamplerState, ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
-    D3D11_RTV_DIMENSION_TEXTURE2D, D3D11_SAMPLER_DESC, D3D11_SHADER_RESOURCE_VIEW_DESC,
-    D3D11_SHADER_RESOURCE_VIEW_DESC_0, D3D11_TEX2D_RTV, D3D11_TEX2D_SRV, D3D11_TEXTURE_ADDRESS_CLAMP,
-    D3D11_VIEWPORT, D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_RENDER_TARGET_VIEW_DESC,
-    D3D11_RENDER_TARGET_VIEW_DESC_0,
+    D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_RENDER_TARGET_VIEW_DESC,
+    D3D11_RENDER_TARGET_VIEW_DESC_0, D3D11_RTV_DIMENSION_TEXTURE2D, D3D11_SAMPLER_DESC,
+    D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_SHADER_RESOURCE_VIEW_DESC_0, D3D11_TEX2D_ARRAY_SRV,
+    D3D11_TEX2D_RTV, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_VIEWPORT,
 };
-use windows::Win32::Graphics::Direct3D::ID3DBlob;
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_UNSPECIFIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
     DXGI_FORMAT_R8G8_UNORM, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC,
@@ -45,8 +50,8 @@ use crate::{ColorMode, RenderError, Renderer};
 
 /// First-party HLSL: fullscreen triangle + NV12 → RGB (BT.709 limited range).
 const SHADER_HLSL: &str = r#"
-Texture2D<float>  YTex  : register(t0);
-Texture2D<float2> UVTex : register(t1);
+Texture2DArray<float>  YTex  : register(t0);
+Texture2DArray<float2> UVTex : register(t1);
 SamplerState Samp : register(s0);
 
 struct VSOut { float4 pos : SV_Position; float2 uv : TEXCOORD0; };
@@ -61,8 +66,9 @@ VSOut VSMain(uint vid : SV_VertexID) {
 }
 
 float4 PSMain(VSOut i) : SV_Target {
-    float  y  = YTex.Sample(Samp, i.uv).r;
-    float2 cc = UVTex.Sample(Samp, i.uv).rg;
+    // Each view exposes exactly one slice (the frame), so the array index is 0.
+    float  y  = YTex.Sample(Samp, float3(i.uv, 0.0)).r;
+    float2 cc = UVTex.Sample(Samp, float3(i.uv, 0.0)).rg;
     float yf = (y      - 16.0/255.0)  * (255.0/219.0);
     float uf = (cc.x   - 128.0/255.0) * (255.0/224.0);
     float vf = (cc.y   - 128.0/255.0) * (255.0/224.0);
@@ -80,10 +86,12 @@ fn werr(e: windows::core::Error) -> RenderError {
     RenderError::Failed(format!("d3d11: {e}"))
 }
 
-/// Keeps a presented frame's texture + SRVs alive one extra present (the GPU
-/// finishes sampling before we release).
+/// Keeps a presented frame + its SRVs alive one extra present (the GPU finishes
+/// sampling before we release). Holding the frame also holds the decoder sample
+/// behind a direct frame, so the decoder cannot reuse that texture slice while
+/// it is on screen.
 type Hold = (
-    ID3D11Texture2D,
+    starfire_decode::frame::native_win::D3d11Frame,
     ID3D11ShaderResourceView,
     ID3D11ShaderResourceView,
 );
@@ -209,19 +217,25 @@ impl D3d11Renderer {
         Ok(rtv)
     }
 
-    /// Build an SRV over one NV12 plane (Y = R8, CbCr = R8G8).
+    /// Build an SRV over one NV12 plane (Y = R8, CbCr = R8G8) of `slice`. The
+    /// view is always a one-slice array view: that fits both a decoder's own
+    /// output texture (an array, one slice per frame) and a private copy (a
+    /// plain texture is an array of one), so one shader serves both.
     unsafe fn plane_srv(
         &self,
         tex: &ID3D11Texture2D,
+        slice: u32,
         format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT,
     ) -> Result<ID3D11ShaderResourceView, RenderError> {
         let desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
             Format: format,
-            ViewDimension: D3D11_SRV_DIMENSION_TEXTURE2D,
+            ViewDimension: D3D11_SRV_DIMENSION_TEXTURE2DARRAY,
             Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
-                Texture2D: D3D11_TEX2D_SRV {
+                Texture2DArray: D3D11_TEX2D_ARRAY_SRV {
                     MostDetailedMip: 0,
                     MipLevels: 1,
+                    FirstArraySlice: slice,
+                    ArraySize: 1,
                 },
             },
         };
@@ -239,12 +253,12 @@ impl Renderer for D3d11Renderer {
     }
 
     fn present(&mut self, frame: &VideoFrame) -> Result<(), RenderError> {
-        let Some(tex) = frame.native_d3d11.as_ref().map(|f| f.texture.clone()) else {
+        let Some(native) = frame.native_d3d11.clone() else {
             return Ok(()); // not a zero-copy frame — nothing for the D3D11 path
         };
         unsafe {
-            let y_srv = self.plane_srv(&tex, DXGI_FORMAT_R8_UNORM)?;
-            let uv_srv = self.plane_srv(&tex, DXGI_FORMAT_R8G8_UNORM)?;
+            let y_srv = self.plane_srv(&native.texture, native.slice, DXGI_FORMAT_R8_UNORM)?;
+            let uv_srv = self.plane_srv(&native.texture, native.slice, DXGI_FORMAT_R8G8_UNORM)?;
             let rtv = self.ensure_rtv()?;
             let ctx = &self.context;
 
@@ -272,7 +286,7 @@ impl Renderer for D3d11Renderer {
 
             // GPU-completion holders: release resources two frames old.
             self.prev_hold = self.last_hold.take();
-            self.last_hold = Some((tex, y_srv, uv_srv));
+            self.last_hold = Some((native, y_srv, uv_srv));
         }
         Ok(())
     }

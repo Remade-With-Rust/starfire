@@ -126,11 +126,22 @@ pub mod native {
 #[cfg(target_os = "windows")]
 pub mod native_win {
     use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
+    use windows::Win32::Media::MediaFoundation::IMFSample;
 
-    /// A decoded NV12 frame in a D3D11 texture (subresource 0).
+    /// A decoded NV12 frame in a D3D11 texture.
+    ///
+    /// Either one of the decoder's own output textures (the direct path: no
+    /// copy at all -- `slice` selects the frame within the decoder's texture
+    /// array and `keep_alive` stops the decoder from reusing it while it is on
+    /// screen), or a private single-slice copy (`slice == 0`, no `keep_alive`).
     #[derive(Debug, Clone)]
     pub struct D3d11Frame {
         pub texture: ID3D11Texture2D,
+        /// Array slice of `texture` holding this frame (0 for a private copy).
+        pub slice: u32,
+        /// The decoder sample that owns the slice; hold it for as long as the
+        /// frame may still be sampled.
+        pub keep_alive: Option<IMFSample>,
     }
 
     // The texture is only used on the shared, multithread-protected D3D11 device;

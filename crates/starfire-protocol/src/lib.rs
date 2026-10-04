@@ -17,8 +17,11 @@
 //! its callers stay unchanged throughout.
 
 pub mod error;
+pub mod fec;
 pub mod hex;
+pub mod metrics;
 pub mod pairing;
+pub mod video;
 pub mod wire;
 pub mod xml;
 

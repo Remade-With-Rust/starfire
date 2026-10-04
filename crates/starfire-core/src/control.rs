@@ -106,14 +106,27 @@ impl ControlChannel {
         self.host.peer(self.peer).round_trip_time()
     }
 
-    /// Send a raw (already-framed) control packet, reliably.
+    /// Send a raw (already-framed) control packet, reliably, and put it on the
+    /// wire now.
     pub fn send(&mut self, channel: u8, data: &[u8]) -> crate::Result<()> {
+        self.queue(channel, data)?;
+        self.flush();
+        Ok(())
+    }
+
+    /// Queue a reliable control packet without sending yet. Queue a batch, then
+    /// [`flush`](ControlChannel::flush) once: ENet packs the queued commands
+    /// into as few datagrams as fit, instead of one datagram per message.
+    pub fn queue(&mut self, channel: u8, data: &[u8]) -> crate::Result<()> {
         let packet = enet::Packet::reliable(data);
         self.host
             .peer_mut(self.peer)
             .send(channel, &packet)
-            .map_err(|e| crate::Error::Protocol(format!("enet send: {e:?}")))?;
+            .map_err(|e| crate::Error::Protocol(format!("enet send: {e:?}")))
+    }
+
+    /// Put everything queued on the wire immediately.
+    pub fn flush(&mut self) {
         self.host.flush();
-        Ok(())
     }
 }

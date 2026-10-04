@@ -4,6 +4,7 @@
 resolver = "2"
 members = [
     "crates/starfire-protocol",
+    "crates/starfire-rt",
     "crates/starfire-core",
     "crates/starfire-decode",
     "crates/starfire-client",
@@ -27,7 +28,9 @@ rust-version = "1.95"
 thiserror = "2"
 tracing = "0.1"
 # protocol-core libs (added to crates as their layers land)
-reed-solomon-erasure = "6"
+# Video FEC kernels: ISA-L remade in Rust (SIMD to GFNI/NEON, no C). The nanors-
+# compatible Cauchy matrix is supplied by starfire-protocol::fec.
+rusty_erasure = "0.4.1"
 sha2 = "0.10"
 aes = "0.8"
 aes-gcm = "0.10"
@@ -39,6 +42,7 @@ x509-parser = "0.16" # extract X.509 cert signature bytes for the hash chain (F2
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] } # mTLS HTTPS (F3)
 rustls-pki-types = { version = "1", features = ["std"] } # PEM cert/key parsing (F3)
 rusty_enet = "0.4" # reliable-UDP control channel (F6)
+socket2 = "0.6"    # socket options std lacks: a large SO_RCVBUF on the media sockets
 # test support
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }

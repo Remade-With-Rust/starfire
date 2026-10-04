@@ -12,6 +12,7 @@ description = "Embeddable Starfire client SDK: pair, stream, and hardware-decode
 [dependencies]
 starfire-core = { path = "../starfire-core" }
 starfire-decode = { path = "../starfire-decode" }
+starfire-rt = { path = "../starfire-rt" }
 
 [lints]
 workspace = true

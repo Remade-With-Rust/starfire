@@ -79,9 +79,15 @@ impl PairedClient {
     }
 
     fn get(&self, path: &str) -> crate::Result<crate::discovery::HttpResponse> {
-        let resp = self
-            .https
-            .get(&self.host, self.https_port, path, self.timeout)?;
+        self.get_within(path, self.timeout)
+    }
+
+    fn get_within(
+        &self,
+        path: &str,
+        timeout: Duration,
+    ) -> crate::Result<crate::discovery::HttpResponse> {
+        let resp = self.https.get(&self.host, self.https_port, path, timeout)?;
         if resp.status != 200 {
             return Err(crate::Error::Protocol(format!(
                 "{path}: HTTP {}",
@@ -126,6 +132,13 @@ impl PairedClient {
     /// `/cancel` — terminate the running session.
     pub fn cancel(&self) -> crate::Result<()> {
         self.get(&format!("/cancel?uniqueid={}", self.uniqueid))?;
+        Ok(())
+    }
+
+    /// `/cancel` with an explicit time limit — for teardown, where a host that
+    /// has gone away must not hold the caller for the full request timeout.
+    pub fn cancel_with_timeout(&self, timeout: Duration) -> crate::Result<()> {
+        self.get_within(&format!("/cancel?uniqueid={}", self.uniqueid), timeout)?;
         Ok(())
     }
 }

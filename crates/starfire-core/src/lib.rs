@@ -21,7 +21,7 @@
 // and `crate::{Error, Result}` keep resolving unchanged across this crate and
 // its downstream users during the incremental migration.
 pub use starfire_protocol::error::{Error, Result};
-pub use starfire_protocol::{error, hex, wire, xml};
+pub use starfire_protocol::{error, hex, metrics, wire, xml};
 
 pub mod https;
 
