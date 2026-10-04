@@ -43,8 +43,9 @@ pub fn parse_flat(xml: &[u8]) -> crate::Result<Flat> {
                 // The reader returns the local name with any `ns:` prefix stripped.
                 let name = reader.local_name().unwrap_or_default().to_string();
                 if name == "root" {
-                    out.status_code =
-                        reader.get_attribute("status_code").and_then(|v| v.parse().ok());
+                    out.status_code = reader
+                        .get_attribute("status_code")
+                        .and_then(|v| v.parse().ok());
                     out.status_message = reader.get_attribute("status_message");
                 }
                 // `<tag/>` raises no EndElement, so it must not be pushed.

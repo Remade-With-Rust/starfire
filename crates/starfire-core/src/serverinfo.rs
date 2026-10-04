@@ -92,8 +92,9 @@ impl ServerInfo {
                     // The reader strips the `ns:` prefix itself.
                     let name = reader.local_name().unwrap_or_default().to_string();
                     if name == "root" {
-                        status_code =
-                            reader.get_attribute("status_code").and_then(|v| v.parse().ok());
+                        status_code = reader
+                            .get_attribute("status_code")
+                            .and_then(|v| v.parse().ok());
                     }
                     // `<tag/>` raises no EndElement: record it and do not push.
                     if reader.is_empty_element() {
