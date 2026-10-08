@@ -73,24 +73,30 @@ pub mod rtp {
         /// (the exact inverse of [`parse_header`]) — the single definition of
         /// the layout for anything that builds video packets. Returns `false`
         /// (nothing written) if `pkt` is shorter than the header.
+        ///
+        /// `#[inline]`: the host writes one per datagram; inlined into the
+        /// packetizer's loop the header is assembled in registers and stored
+        /// once, instead of a zero-fill plus field stores behind a call.
+        #[inline]
         pub fn write(&self, pkt: &mut [u8]) -> bool {
-            if pkt.len() < PAYLOAD_OFFSET {
+            let Some(out) = pkt.first_chunk_mut::<PAYLOAD_OFFSET>() else {
                 return false;
-            }
-            pkt[..PAYLOAD_OFFSET].fill(0);
-            pkt[0] = RTP_V2_EXT;
-            pkt[2..4].copy_from_slice(&self.rtp_seq.to_be_bytes());
-            pkt[4..8].copy_from_slice(&self.rtp_timestamp.to_be_bytes());
-            pkt[NV_OFFSET..NV_OFFSET + 4].copy_from_slice(&self.stream_packet_index.to_le_bytes());
-            pkt[NV_OFFSET + 4..NV_OFFSET + 8].copy_from_slice(&self.frame_index.to_le_bytes());
-            pkt[NV_OFFSET + 8] = self.flags;
-            pkt[NV_OFFSET + 10] = MULTI_FEC_FLAGS;
-            pkt[NV_OFFSET + 11] = ((self.fec_block & 0x3) << MULTI_FEC_BLOCK_SHIFT)
+            };
+            let mut h = [0u8; PAYLOAD_OFFSET];
+            h[0] = RTP_V2_EXT;
+            h[2..4].copy_from_slice(&self.rtp_seq.to_be_bytes());
+            h[4..8].copy_from_slice(&self.rtp_timestamp.to_be_bytes());
+            h[NV_OFFSET..NV_OFFSET + 4].copy_from_slice(&self.stream_packet_index.to_le_bytes());
+            h[NV_OFFSET + 4..NV_OFFSET + 8].copy_from_slice(&self.frame_index.to_le_bytes());
+            h[NV_OFFSET + 8] = self.flags;
+            h[NV_OFFSET + 10] = MULTI_FEC_FLAGS;
+            h[NV_OFFSET + 11] = ((self.fec_block & 0x3) << MULTI_FEC_BLOCK_SHIFT)
                 | ((self.fec_last_block & 0x3) << MULTI_FEC_LAST_SHIFT);
             let fec_info: u32 = ((self.data_shards as u32 & FEC_10BIT) << FEC_DATASHARDS_SHIFT)
                 | ((self.shard_index as u32 & FEC_10BIT) << FEC_SHARD_SHIFT)
                 | ((self.fec_percentage as u32) << FEC_PCT_SHIFT);
-            pkt[NV_OFFSET + 12..NV_OFFSET + 16].copy_from_slice(&fec_info.to_le_bytes());
+            h[NV_OFFSET + 12..NV_OFFSET + 16].copy_from_slice(&fec_info.to_le_bytes());
+            *out = h;
             true
         }
     }
