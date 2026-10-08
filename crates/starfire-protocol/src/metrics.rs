@@ -226,11 +226,14 @@ pub mod media_clock {
 /// result.
 #[derive(Debug, Clone)]
 pub struct TransitTracker {
-    window: Duration,
+    /// The floor window in nanoseconds (comparisons run on an integer timeline).
+    window_ns: i64,
     epoch: Option<(Instant, u32)>,
-    /// Monotonic deque of `(arrival, transit_us)`: transit values strictly
-    /// increase front to back, so the front is the window minimum.
-    mins: VecDeque<(Instant, i64)>,
+    /// Monotonic deque of `(arrival_ns, transit_us)`, arrival in nanoseconds
+    /// since the epoch: transit values strictly increase front to back, so the
+    /// front is the window minimum. Integer times keep each eviction test a
+    /// subtraction instead of an `Instant` difference.
+    mins: VecDeque<(i64, i64)>,
 }
 
 impl TransitTracker {
@@ -244,7 +247,7 @@ impl TransitTracker {
 
     pub fn with_window(window: Duration) -> Self {
         Self {
-            window,
+            window_ns: window.as_nanos().min(i64::MAX as u128) as i64,
             epoch: None,
             mins: VecDeque::new(),
         }
@@ -254,12 +257,18 @@ impl TransitTracker {
     /// frame's delay above the window floor (zero for the fastest frame).
     pub fn observe(&mut self, sender_ts: u32, arrival: Instant) -> Duration {
         let (t0, ts0) = *self.epoch.get_or_insert((arrival, sender_ts));
-        let local_us = arrival.saturating_duration_since(t0).as_micros() as i64;
+        let local_ns = arrival
+            .saturating_duration_since(t0)
+            .as_nanos()
+            .min(i64::MAX as u128) as i64;
+        let local_us = local_ns / 1_000;
         let sender_us = media_clock::delta_us(ts0, sender_ts);
         let transit = local_us - sender_us;
 
+        // Same test as `arrival - at > window` on Instants (an arrival before
+        // `at` is a negative difference, never past the window).
         while let Some(&(at, _)) = self.mins.front() {
-            if arrival.saturating_duration_since(at) > self.window {
+            if local_ns - at > self.window_ns {
                 self.mins.pop_front();
             } else {
                 break;
@@ -272,7 +281,7 @@ impl TransitTracker {
                 break;
             }
         }
-        self.mins.push_back((arrival, transit));
+        self.mins.push_back((local_ns, transit));
         let floor = self.mins.front().map(|&(_, t)| t).unwrap_or(transit);
         Duration::from_micros((transit - floor).max(0) as u64)
     }
