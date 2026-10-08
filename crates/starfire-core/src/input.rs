@@ -99,12 +99,12 @@ pub fn merge_mouse_rel(prev: &mut [u8], next: &[u8]) -> bool {
 
 /// Absolute mouse position within a `width`×`height` reference viewport.
 pub fn mouse_move_abs(x: i16, y: i16, width: i16, height: i16) -> Vec<u8> {
-    let mut body = Vec::with_capacity(10);
-    body.extend_from_slice(&x.to_be_bytes());
-    body.extend_from_slice(&y.to_be_bytes());
-    body.extend_from_slice(&0i16.to_be_bytes()); // unused
-    body.extend_from_slice(&width.to_be_bytes());
-    body.extend_from_slice(&height.to_be_bytes());
+    let mut body = [0u8; 10];
+    body[0..2].copy_from_slice(&x.to_be_bytes());
+    body[2..4].copy_from_slice(&y.to_be_bytes());
+    // body[4..6] unused (zero)
+    body[6..8].copy_from_slice(&width.to_be_bytes());
+    body[8..10].copy_from_slice(&height.to_be_bytes());
     frame(MAGIC_MOUSE_MOVE_ABS, &body)
 }
 
@@ -116,10 +116,10 @@ pub fn mouse_button(button: MouseButton, down: bool) -> Vec<u8> {
 
 /// Vertical scroll (positive = up). `amount` is in 120ths of a wheel notch.
 pub fn scroll_vertical(amount: i16) -> Vec<u8> {
-    let mut body = Vec::with_capacity(6);
-    body.extend_from_slice(&amount.to_be_bytes()); // scrollAmt1
-    body.extend_from_slice(&amount.to_be_bytes()); // scrollAmt2
-    body.extend_from_slice(&0i16.to_be_bytes()); // zero3
+    let mut body = [0u8; 6];
+    body[0..2].copy_from_slice(&amount.to_be_bytes()); // scrollAmt1
+    body[2..4].copy_from_slice(&amount.to_be_bytes()); // scrollAmt2
+    // body[4..6] zero3
     frame(MAGIC_SCROLL, &body)
 }
 
@@ -137,11 +137,11 @@ pub fn scroll_horizontal(amount: i16) -> Vec<u8> {
 /// host reads it un-swapped, VK in the low byte). [SOURCE: Input.h pack(1)]
 pub fn key(vk: u16, modifiers: u8, down: bool) -> Vec<u8> {
     let magic = if down { MAGIC_KEY_DOWN } else { MAGIC_KEY_UP };
-    let mut body = Vec::with_capacity(6);
-    body.push(0u8); // flags
-    body.extend_from_slice(&vk.to_le_bytes()); // keyCode (LE)
-    body.push(modifiers); // modifiers
-    body.extend_from_slice(&0u16.to_le_bytes()); // zero2
+    let mut body = [0u8; 6];
+    // body[0] flags (zero)
+    body[1..3].copy_from_slice(&vk.to_le_bytes()); // keyCode (LE)
+    body[3] = modifiers; // modifiers
+    // body[4..6] zero2
     frame(magic, &body)
 }
 
