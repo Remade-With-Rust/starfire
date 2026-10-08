@@ -116,7 +116,11 @@ impl LatencySeries {
         } else {
             self.window[self.next] = us;
         }
-        self.next = (self.next + 1) % self.cap;
+        // Wrap the ring index with a compare, not a division (`next < cap`).
+        self.next += 1;
+        if self.next == self.cap {
+            self.next = 0;
+        }
         self.count += 1;
         self.sum_us += us as u64;
         self.min_us = self.min_us.min(us);
