@@ -18,8 +18,6 @@
 //!   against it (see the tests), and it is the fallback if a coder cannot be
 //!   built.
 
-use std::collections::HashMap;
-
 use rusty_erasure::{Coder, Matrix};
 
 /// Largest `data + parity` shard count one FEC block can carry. The Cauchy
@@ -72,7 +70,10 @@ const CODER_CACHE: usize = 48;
 /// one) rather than constructing it per frame.
 #[derive(Default)]
 pub struct Fec {
-    coders: HashMap<(u16, u16), Coder>,
+    /// `(k, m)` -> coder, at most [`CODER_CACHE`] entries. A short vector
+    /// scanned by key: cheaper per lookup than hashing the key (twice) with
+    /// SipHash, and deterministic -- no per-process random hash seed.
+    coders: Vec<((u16, u16), Coder)>,
     /// Blocks recovered through the SIMD path / through the scalar fallback —
     /// the reach census: the fallback count must stay zero in production.
     pub fast_blocks: u64,
@@ -102,14 +103,18 @@ impl Fec {
 
     fn coder(&mut self, k: usize, m: usize) -> Option<&Coder> {
         let key = (k as u16, m as u16);
-        if !self.coders.contains_key(&key) {
-            let coder = rusty_erasure::coder(generator(k, m)?).ok()?;
-            if self.coders.len() >= CODER_CACHE {
-                self.coders.clear();
+        let at = match self.coders.iter().position(|(have, _)| *have == key) {
+            Some(at) => at,
+            None => {
+                let coder = rusty_erasure::coder(generator(k, m)?).ok()?;
+                if self.coders.len() >= CODER_CACHE {
+                    self.coders.clear();
+                }
+                self.coders.push((key, coder));
+                self.coders.len() - 1
             }
-            self.coders.insert(key, coder);
-        }
-        self.coders.get(&key)
+        };
+        self.coders.get(at).map(|(_, c)| c)
     }
 
     /// Generate parity for one block: `data` is `k` equal-length shards,
