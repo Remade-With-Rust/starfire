@@ -146,25 +146,41 @@ impl LatencySeries {
         self.max_us = 0;
     }
 
-    /// Percentile summary. Sorts a copy of the window, so call it at report
+    /// Percentile summary. Works on a copy of the window, so call it at report
     /// time (once a second), not per frame.
+    ///
+    /// Three order statistics need no full sort: select the p99 rank, then
+    /// select p95 within everything below it, then p50 within everything below
+    /// that -- each `select_nth_unstable` is linear, against a full sort's
+    /// `n log n` (a 4096-sample window sorted per report).
     pub fn summary(&self) -> Summary {
         if self.count == 0 {
             return Summary::default();
         }
-        let mut sorted = self.window.clone();
-        sorted.sort_unstable();
-        let at = |p: f64| -> u32 {
-            let idx = ((sorted.len() - 1) as f64 * p).round() as usize;
-            sorted[idx.min(sorted.len() - 1)]
+        let mut v = self.window.clone();
+        let rank =
+            |p: f64| -> usize { (((v.len() - 1) as f64 * p).round() as usize).min(v.len() - 1) };
+        let (i50, i95, i99) = (rank(0.50), rank(0.95), rank(0.99));
+        let p99 = *v.select_nth_unstable(i99).1;
+        // Everything left of i99 is now <= p99 and holds the i99 smallest, so
+        // lower ranks can be selected inside that prefix alone.
+        let p95 = if i95 == i99 {
+            p99
+        } else {
+            *v[..i99].select_nth_unstable(i95).1
+        };
+        let p50 = if i50 == i95 {
+            p95
+        } else {
+            *v[..i95].select_nth_unstable(i50).1
         };
         Summary {
             count: self.count,
             min_us: self.min_us,
             mean_us: (self.sum_us / self.count) as u32,
-            p50_us: at(0.50),
-            p95_us: at(0.95),
-            p99_us: at(0.99),
+            p50_us: p50,
+            p95_us: p95,
+            p99_us: p99,
             max_us: self.max_us,
         }
     }
@@ -272,6 +288,35 @@ impl Default for TransitTracker {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// The selection-based percentiles equal a full sort's, for every window
+    /// size from 1 up and for heavily duplicated samples.
+    #[test]
+    fn summary_percentiles_match_a_full_sort() {
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        for n in (1..=300).chain([1000, 4096, 5000]) {
+            for modulo in [7u64, 1_000_000] {
+                let mut s = LatencySeries::with_window(4096);
+                for _ in 0..n {
+                    x = x
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    s.record_us((x >> 33) % modulo);
+                }
+                let mut sorted = s.window.clone();
+                sorted.sort_unstable();
+                let at = |p: f64| {
+                    sorted[(((sorted.len() - 1) as f64 * p).round() as usize).min(sorted.len() - 1)]
+                };
+                let got = s.summary();
+                assert_eq!(
+                    (got.p50_us, got.p95_us, got.p99_us),
+                    (at(0.50), at(0.95), at(0.99)),
+                    "n {n} modulo {modulo}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn empty_series_summarises_to_zero() {
