@@ -131,7 +131,7 @@ pub fn scroll_vertical(amount: i16) -> Vec<u8> {
     let mut body = [0u8; 6];
     body[0..2].copy_from_slice(&amount.to_be_bytes()); // scrollAmt1
     body[2..4].copy_from_slice(&amount.to_be_bytes()); // scrollAmt2
-    // body[4..6] zero3
+                                                       // body[4..6] zero3
     frame(MAGIC_SCROLL, &body)
 }
 
@@ -153,7 +153,7 @@ pub fn key(vk: u16, modifiers: u8, down: bool) -> Vec<u8> {
     // body[0] flags (zero)
     body[1..3].copy_from_slice(&vk.to_le_bytes()); // keyCode (LE)
     body[3] = modifiers; // modifiers
-    // body[4..6] zero2
+                         // body[4..6] zero2
     frame(magic, &body)
 }
 

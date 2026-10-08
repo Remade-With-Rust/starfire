@@ -105,7 +105,10 @@ mod tests {
     /// requires 2.2.5. Fails here if a resolver change ever drags it back.
     #[test]
     fn linked_allocator_is_at_least_2_2_5() {
-        let parts: Vec<u32> = version().split('.').filter_map(|p| p.parse().ok()).collect();
+        let parts: Vec<u32> = version()
+            .split('.')
+            .filter_map(|p| p.parse().ok())
+            .collect();
         assert!(parts.len() >= 3, "unparseable version {:?}", version());
         assert!(
             (parts[0], parts[1], parts[2]) >= (2, 2, 5),
