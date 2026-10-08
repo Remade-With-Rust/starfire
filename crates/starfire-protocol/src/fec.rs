@@ -223,15 +223,21 @@ fn recover_missing(
     for c in 0..k {
         bytes[c * k + c] = 1;
     }
-    for s_row in 0..e {
-        let row = &mut bytes[(k + s_row) * k..(k + s_row + 1) * k];
-        for (t, &j) in parity.iter().enumerate() {
+    // Each Cauchy row C[j][present] is computed once (a field inverse per
+    // entry) and then folded into all e output rows.
+    let mut crow = vec![0u8; present.len()];
+    for (t, &j) in parity.iter().enumerate() {
+        for (slot, &i) in crow.iter_mut().zip(&present) {
+            *slot = parity_coeff(m, i, j);
+        }
+        for s_row in 0..e {
             let w = inv[s_row * e + t];
             if w == 0 {
                 continue;
             }
-            for (c, &i) in present.iter().enumerate() {
-                row[c] ^= gf::mul(w, parity_coeff(m, i, j));
+            let row = &mut bytes[(k + s_row) * k..(k + s_row + 1) * k];
+            for (d, &c) in row.iter_mut().zip(&crow) {
+                *d ^= gf::mul(w, c);
             }
             row[present.len() + t] ^= w;
         }
