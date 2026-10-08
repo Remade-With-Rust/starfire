@@ -42,13 +42,25 @@ pub enum MouseButton {
 /// Frame an input packet: `[type:u16 LE][size:u32 BE][magic:u32 LE][body]`.
 /// `size` is the NV_INPUT_HEADER size = `magic (4) + body` (excludes the size
 /// field and the control type). The whole buffer is one ENet control payload.
+///
+/// Every body is at most 10 bytes, so the message is assembled in a stack
+/// buffer and copied to the heap once (one allocation, one copy) instead of
+/// four capacity-checked appends.
 fn frame(magic: u32, body: &[u8]) -> Vec<u8> {
-    let mut v = Vec::with_capacity(2 + 8 + body.len());
-    v.extend_from_slice(&CTRL_TYPE_INPUT.to_le_bytes());
-    v.extend_from_slice(&((4 + body.len()) as u32).to_be_bytes());
-    v.extend_from_slice(&magic.to_le_bytes());
-    v.extend_from_slice(body);
-    v
+    const HEAD: usize = 10;
+    const MAX_BODY: usize = 16;
+    let mut head = [0u8; HEAD];
+    head[0..2].copy_from_slice(&CTRL_TYPE_INPUT.to_le_bytes());
+    head[2..6].copy_from_slice(&((4 + body.len()) as u32).to_be_bytes());
+    head[6..10].copy_from_slice(&magic.to_le_bytes());
+    if body.len() > MAX_BODY {
+        // No message has such a body today; never truncate one if it appears.
+        return [&head[..], body].concat();
+    }
+    let mut m = [0u8; HEAD + MAX_BODY];
+    m[..HEAD].copy_from_slice(&head);
+    m[HEAD..HEAD + body.len()].copy_from_slice(body);
+    m[..HEAD + body.len()].to_vec()
 }
 
 /// Relative mouse motion (raw deltas) — the FPS path: no acceleration, no
