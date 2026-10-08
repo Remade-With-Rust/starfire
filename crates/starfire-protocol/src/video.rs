@@ -128,6 +128,11 @@ pub mod rtp {
     }
 
     /// Parse the header of one received video datagram. `None` if too short.
+    ///
+    /// `#[inline]`: it runs once per received packet from the depacketizer in
+    /// another crate, which reads only some of the fields; inlined, the unused
+    /// ones are never loaded and there is no call frame.
+    #[inline]
     pub fn parse_header(pkt: &[u8]) -> Option<VideoHeader> {
         if pkt.len() < PAYLOAD_OFFSET {
             return None;
