@@ -715,9 +715,21 @@ fn run_headless(cfg: StarfireConfig) {
     client.stop(); // tells the host to end the session before we exit
 }
 
+// The process-wide allocator (crates/starfire-alloc). Declared here, in the
+// deliverable, never in a library.
+#[global_allocator]
+static ALLOC: starfire_alloc::Alloc = starfire_alloc::Alloc;
+
 // Top-level init failures (event loop / GPU) are fatal and worth a panic.
 #[allow(clippy::expect_used)]
 fn main() {
+    let alloc = starfire_alloc::configure(starfire_alloc::Profile::LongLived);
+    eprintln!(
+        "[starfire] allocator rusty_alloc {} (purge_delay {}, secure {})",
+        starfire_alloc::version(),
+        alloc.purge_delay,
+        alloc.secure
+    );
     keep_awake(); // never let App Nap / display sleep throttle the stream
 
     // Request this display's native refresh unless the operator pinned it.

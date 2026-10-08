@@ -5,6 +5,7 @@ resolver = "2"
 members = [
     "crates/starfire-protocol",
     "crates/starfire-rt",
+    "crates/starfire-alloc",
     "crates/starfire-core",
     "crates/starfire-decode",
     "crates/starfire-client",
@@ -43,6 +44,10 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-pki-types = { version = "1", features = ["std"] } # PEM cert/key parsing (F3)
 rusty_enet = "0.4" # reliable-UDP control channel (F6)
 socket2 = "0.6"    # socket options std lacks: a large SO_RCVBUF on the media sockets
+# Global allocator: rusty_alloc (pure-Rust mimalloc remake). Only starfire-alloc
+# may depend on these; deliverables depend on starfire-alloc. 2.2.5 is a floor.
+rusty_alloc-api = "2.2.5"
+rusty_alloc = "2.2.5"
 # test support
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }

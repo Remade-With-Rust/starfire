@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: Apache-2.0
+# starfire-alloc -- the one seam through which Starfire's deliverables adopt the
+# rusty_alloc global allocator: the version requirement, the startup
+# configuration and the hardening feature, decided once instead of per binary.
+[package]
+name = "starfire-alloc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Global allocator seam for Starfire deliverables (rusty_alloc)."
+
+[dependencies]
+# The safe surface is what a deliverable names (`Alloc`)...
+rusty_alloc-api = { workspace = true }
+# ...and the core is here ONLY to reach `options`, which the api crate does not
+# re-export. No other crate in the workspace may depend on either.
+rusty_alloc = { workspace = true }
+
+[features]
+default = []
+# Hardened build: encrypted free lists and a same-segment link bound.
+secure = ["rusty_alloc-api/secure", "rusty_alloc/secure"]
+
+[lints]
+workspace = true

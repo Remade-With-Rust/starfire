@@ -13,6 +13,7 @@ name = "starfire"
 path = "src/main.rs"
 
 [dependencies]
+starfire-alloc = { path = "../starfire-alloc" } # the global allocator (declared in main.rs)
 starfire-client = { path = "../starfire-client" } # the pipeline; this app is one consumer of it
 starfire-core = { path = "../starfire-core" }
 starfire-decode = { path = "../starfire-decode" }
