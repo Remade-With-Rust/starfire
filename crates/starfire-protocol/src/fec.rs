@@ -205,7 +205,10 @@ fn recover_missing(
 ) -> Option<Vec<Vec<u8>>> {
     use rusty_erasure::gf;
     let e = missing.len();
-    let parity: Vec<usize> = (0..m).filter(|&j| shards[k + j].is_some()).take(e).collect();
+    let parity: Vec<usize> = (0..m)
+        .filter(|&j| shards[k + j].is_some())
+        .take(e)
+        .collect();
     if parity.len() < e || k + m > MAX_BLOCK_SHARDS {
         return None;
     }
@@ -248,11 +251,15 @@ fn recover_missing(
         }
     }
     let coder = rusty_erasure::coder(Matrix::from_bytes(k + e, k, bytes).ok()?).ok()?;
-    let sources: Vec<&[u8]> = present
-        .iter()
-        .map(|&i| shards[i].as_deref())
-        .chain(parity.iter().map(|&j| shards[k + j].as_deref()))
-        .collect::<Option<Vec<&[u8]>>>()?;
+    // Exact capacity: an `Option`-shunted collect has no size hint and grew
+    // this list by reallocation on every recovered block.
+    let mut sources: Vec<&[u8]> = Vec::with_capacity(k);
+    for &i in &present {
+        sources.push(shards[i].as_deref()?);
+    }
+    for &j in &parity {
+        sources.push(shards[k + j].as_deref()?);
+    }
     let mut out: Vec<Vec<u8>> = vec![vec![0u8; len]; e];
     {
         let mut out_refs: Vec<&mut [u8]> = out.iter_mut().map(|v| v.as_mut_slice()).collect();
