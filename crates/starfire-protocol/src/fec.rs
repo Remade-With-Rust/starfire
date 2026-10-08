@@ -160,20 +160,7 @@ impl Fec {
             return false; // a malformed (short) shard cannot be mixed into the solve
         }
 
-        let rebuilt = match self.coder(k, m) {
-            Some(coder) => {
-                let view: Vec<Option<&[u8]>> =
-                    shards[..k + m].iter().map(|s| s.as_deref()).collect();
-                let mut out: Vec<Vec<u8>> = vec![vec![0u8; len]; missing.len()];
-                let ok = {
-                    let mut out_refs: Vec<&mut [u8]> =
-                        out.iter_mut().map(|v| v.as_mut_slice()).collect();
-                    coder.recover(&view, &missing, &mut out_refs).is_ok()
-                };
-                ok.then_some(out)
-            }
-            None => None,
-        };
+        let rebuilt = recover_missing(k, m, &missing, shards, len);
         match rebuilt {
             Some(out) => {
                 for (idx, buf) in missing.into_iter().zip(out) {
@@ -188,6 +175,79 @@ impl Fec {
             }
         }
     }
+}
+
+/// Rebuild the `missing` data shards of one block directly from the code's
+/// structure, without inverting a `k x k` matrix.
+///
+/// With `e` data shards lost, take the first `e` surviving parity shards `J`.
+/// Each parity shard is `P_j = sum_i C[j][i] D_i`, so over GF(2^8)
+/// `sum_{i in missing} C[j][i] D_i = P_j + sum_{i present} C[j][i] D_i`.
+/// `M = C[J][missing]` is an `e x e` Cauchy matrix (always invertible), so
+/// `D_missing = M^-1 [C[J][present] | I_e] (D_present ; P_J)`: one `e x k`
+/// matrix applied to the `k` sources. Only the `e x e` inverse is computed;
+/// a general decoder inverts the whole `k x k` survivor matrix (`O(k^3)`,
+/// ~3.4M field operations at k = 150) for every damaged block.
+///
+/// Returns the rebuilt shards in `missing` order, or `None` if the block cannot
+/// be solved (the caller then falls back to the scalar oracle).
+fn recover_missing(
+    k: usize,
+    m: usize,
+    missing: &[usize],
+    shards: &[Option<Vec<u8>>],
+    len: usize,
+) -> Option<Vec<Vec<u8>>> {
+    use rusty_erasure::gf;
+    let e = missing.len();
+    let parity: Vec<usize> = (0..m).filter(|&j| shards[k + j].is_some()).take(e).collect();
+    if parity.len() < e || k + m > MAX_BLOCK_SHARDS {
+        return None;
+    }
+    let present: Vec<usize> = (0..k).filter(|&i| shards[i].is_some()).collect();
+
+    // M = C[J][missing], inverted in place of the k x k survivor matrix.
+    let mut mat = vec![0u8; e * e];
+    for (t, &j) in parity.iter().enumerate() {
+        for (u, &i) in missing.iter().enumerate() {
+            mat[t * e + u] = parity_coeff(m, i, j);
+        }
+    }
+    let mut inv = vec![0u8; e * e];
+    rusty_erasure::isal::gf_invert_matrix(&mut mat, &mut inv, e).ok()?;
+
+    // Generator [I_k ; R] with R = M^-1 [C[J][present] | I_e]: encoding the k
+    // sources (present data in order, then the chosen parity) yields exactly
+    // the missing data shards.
+    let mut bytes = vec![0u8; (k + e) * k];
+    for c in 0..k {
+        bytes[c * k + c] = 1;
+    }
+    for s_row in 0..e {
+        let row = &mut bytes[(k + s_row) * k..(k + s_row + 1) * k];
+        for (t, &j) in parity.iter().enumerate() {
+            let w = inv[s_row * e + t];
+            if w == 0 {
+                continue;
+            }
+            for (c, &i) in present.iter().enumerate() {
+                row[c] ^= gf::mul(w, parity_coeff(m, i, j));
+            }
+            row[present.len() + t] ^= w;
+        }
+    }
+    let coder = rusty_erasure::coder(Matrix::from_bytes(k + e, k, bytes).ok()?).ok()?;
+    let sources: Vec<&[u8]> = present
+        .iter()
+        .map(|&i| shards[i].as_deref())
+        .chain(parity.iter().map(|&j| shards[k + j].as_deref()))
+        .collect::<Option<Vec<&[u8]>>>()?;
+    let mut out: Vec<Vec<u8>> = vec![vec![0u8; len]; e];
+    {
+        let mut out_refs: Vec<&mut [u8]> = out.iter_mut().map(|v| v.as_mut_slice()).collect();
+        coder.encode(&sources, &mut out_refs).ok()?;
+    }
+    Some(out)
 }
 
 /// The original first-party scalar implementation: log/exp-table GF(2^8)
