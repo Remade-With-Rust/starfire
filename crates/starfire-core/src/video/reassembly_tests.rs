@@ -257,6 +257,59 @@ fn any_loss_pattern_within_the_parity_budget_is_healed() {
     }
 }
 
+/// Data shards may arrive in any order, with or without loss, and the frame is
+/// still byte-identical: shards that arrive early wait in their slots and are
+/// placed once the gap before them closes (in-place assembly).
+#[test]
+fn single_block_shards_may_arrive_in_any_order() {
+    let payload = nals(73, 20 * BS - 100);
+    let pkts = frame(73, true, &payload, BS, 20, 1); // k = 20, m = 4
+    let orders: Vec<Vec<usize>> = vec![
+        (0..24).rev().collect(),      // everything reversed
+        (1..24).chain([0]).collect(), // the header shard last
+        vec![
+            20, 2, 0, 1, 21, 5, 4, 3, 9, 8, 7, 6, 10, 19, 11, 12, 13, 14, 15, 16, 17, 18,
+        ],
+        (0..20)
+            .filter(|i| i % 2 == 1)
+            .chain((0..20).filter(|i| i % 2 == 0))
+            .collect(),
+        vec![
+            22, 23, 19, 18, 17, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+        ], // 0 lost
+    ];
+    for order in orders {
+        let mut dep = Depacketizer::new(Codec::Hevc);
+        let out: Vec<AccessUnit> = order.iter().filter_map(|&i| dep.push(&pkts[i])).collect();
+        assert_eq!(indices(&out), vec![73], "order {order:?}");
+        assert_eq!(out[0].data, payload, "order {order:?}");
+        assert!(out[0].is_keyframe);
+        assert_eq!(out[0].host_latency_tenths_ms, 42);
+    }
+}
+
+/// A data shard shorter than its block's others (malformed) is taken as-is,
+/// exactly as when every frame was concatenated from separate shards: the
+/// frame comes out with that shard's bytes, whichever shard arrives first.
+#[test]
+fn a_data_shard_of_the_wrong_length_is_taken_as_is() {
+    let payload = nals(74, 20 * BS - 100);
+    let mut pkts = frame(74, false, &payload, BS, 20, 1); // k = 20
+    pkts[5].pop(); // shard 5 loses its last byte
+    let mut expected = payload.clone();
+    expected.remove(6 * BS - 1 - rtp::SHORT_FRAME_HEADER_LEN);
+    for order in [
+        (0..24).collect::<Vec<usize>>(), // short shard mid-stream
+        [5].into_iter().chain(0..5).chain(6..24).collect(), // short shard first
+        (0..5).chain(6..20).chain([5]).collect(), // short shard last
+    ] {
+        let mut dep = Depacketizer::new(Codec::Hevc);
+        let out: Vec<AccessUnit> = order.iter().filter_map(|&i| dep.push(&pkts[i])).collect();
+        assert_eq!(indices(&out), vec![74], "order {order:?}");
+        assert_eq!(out[0].data, expected, "order {order:?}");
+    }
+}
+
 /// One loss beyond the parity budget is unrecoverable: no frame, and certainly
 /// no wrong frame.
 #[test]

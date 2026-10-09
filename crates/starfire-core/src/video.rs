@@ -410,6 +410,68 @@ pub mod reassembly {
         first_packet_at: Instant,
         rtp_timestamp: u32,
         packets: u16,
+        /// Single-block protected frames: the access unit being built in place.
+        direct: Option<Direct>,
+    }
+
+    /// The access unit of a single-block, FEC-protected frame, built as its
+    /// data shards arrive instead of being copied together at the end.
+    ///
+    /// Every shard of a protected block has the same length, so data shard `i`
+    /// has a known place in the frame. Shards that arrive in order (nearly all
+    /// of them on a working link) are appended straight into `data`; the rest
+    /// wait in the block's slots as before and are appended once the gap before
+    /// them closes. That removes the second copy of every byte of video -- the
+    /// one that concatenated the shards into the access unit.
+    struct Direct {
+        /// Payload of data shards `0..contig`, without shard 0's 8-byte
+        /// short-frame header.
+        data: Vec<u8>,
+        /// Length of every shard in this block.
+        shard_len: usize,
+        /// Data shards appended so far (always a prefix).
+        contig: usize,
+        /// Shard 0's short-frame header.
+        sof: [u8; rtp::SHORT_FRAME_HEADER_LEN],
+    }
+
+    impl Direct {
+        /// Append data shard `contig` (which must be `payload`'s index).
+        fn append(&mut self, payload: &[u8]) {
+            if self.contig == 0 {
+                let (h, rest) = payload.split_at(rtp::SHORT_FRAME_HEADER_LEN);
+                self.sof.copy_from_slice(h);
+                self.data.extend_from_slice(rest);
+            } else {
+                self.data.extend_from_slice(payload);
+            }
+            self.contig += 1;
+        }
+
+        /// Data shard `i < contig`, as one contiguous slice -- except shard 0,
+        /// whose header lives in `sof` (see [`Direct::shard0`]).
+        fn shard(&self, i: usize) -> &[u8] {
+            let at = (self.shard_len - rtp::SHORT_FRAME_HEADER_LEN) + (i - 1) * self.shard_len;
+            &self.data[at..at + self.shard_len]
+        }
+
+        /// Shard 0 re-joined with its header (loss path / fallback only).
+        fn shard0(&self) -> Vec<u8> {
+            let body = self.shard_len - rtp::SHORT_FRAME_HEADER_LEN;
+            [&self.sof[..], &self.data[..body]].concat()
+        }
+
+        /// Give the appended shards back to the block as ordinary slots: used
+        /// when a shard of the wrong length shows the block is not uniform.
+        fn spill(self, blk: &mut Block) {
+            for i in 0..self.contig {
+                blk.shards[i] = Some(if i == 0 {
+                    self.shard0()
+                } else {
+                    self.shard(i).to_vec()
+                });
+            }
+        }
     }
 
     impl Partial {
@@ -550,7 +612,8 @@ pub mod reassembly {
                 }
             }
 
-            let Some(pos) = self.slot_for(&h, now) else {
+            let payload = &pkt[rtp::PAYLOAD_OFFSET..];
+            let Some(pos) = self.slot_for(&h, payload.len(), now) else {
                 self.stats.late_packets += 1;
                 return None;
             };
@@ -559,7 +622,13 @@ pub mod reassembly {
                 self.stats.malformed_packets += 1;
                 return None;
             }
-            let blk = &mut frame.blocks[block];
+            let Partial {
+                blocks,
+                direct,
+                packets,
+                ..
+            } = frame;
+            let blk = &mut blocks[block];
             if !blk.known() {
                 blk.data_shards = k;
                 blk.parity_shards = m;
@@ -570,19 +639,47 @@ pub mod reassembly {
                 return None;
             }
             let slot = h.shard_index as usize;
-            if blk.shards[slot].is_some() {
+            if direct.as_ref().is_some_and(|d| slot < d.contig) || blk.shards[slot].is_some() {
                 self.stats.duplicate_packets += 1;
                 return None;
             }
-            let mut buf = self.pool.pop().unwrap_or_default();
-            buf.clear();
-            buf.extend_from_slice(&pkt[rtp::PAYLOAD_OFFSET..]);
-            blk.shards[slot] = Some(buf);
+            // A data shard of a different length shows the block is not uniform:
+            // hand the in-place shards back and assemble the classic way.
+            if slot < k
+                && direct
+                    .as_ref()
+                    .is_some_and(|d| payload.len() != d.shard_len)
+            {
+                if let Some(d) = direct.take() {
+                    d.spill(blk);
+                }
+            }
+            match direct.as_mut() {
+                Some(d) if slot == d.contig && slot < k => {
+                    d.append(payload);
+                    // Close the gap: shards that arrived early follow in order.
+                    while d.contig < k {
+                        let Some(buf) = blk.shards[d.contig].take() else {
+                            break;
+                        };
+                        d.append(&buf);
+                        if self.pool.len() < POOL_LIMIT {
+                            self.pool.push(buf);
+                        }
+                    }
+                }
+                _ => {
+                    let mut buf = self.pool.pop().unwrap_or_default();
+                    buf.clear();
+                    buf.extend_from_slice(payload);
+                    blk.shards[slot] = Some(buf);
+                }
+            }
             blk.received += 1;
             if slot < k {
                 blk.received_data += 1;
             }
-            frame.packets = frame.packets.saturating_add(1);
+            *packets = packets.saturating_add(1);
             self.stats.packets += 1;
 
             if self.window[pos].complete() {
@@ -596,7 +693,7 @@ pub mod reassembly {
         /// if needed. When the window is full the oldest in-flight frame is
         /// given up to make room; a packet for a frame older than everything in
         /// a full window is stale and gets `None`.
-        fn slot_for(&mut self, h: &VideoHeader, now: Instant) -> Option<usize> {
+        fn slot_for(&mut self, h: &VideoHeader, shard_len: usize, now: Instant) -> Option<usize> {
             if let Some(pos) = self
                 .window
                 .iter()
@@ -618,12 +715,25 @@ pub mod reassembly {
             }
             let mut blocks = Vec::with_capacity(h.fec_last_block as usize + 1);
             blocks.resize_with(h.fec_last_block as usize + 1, Block::default);
+            // A single protected block: every shard is `shard_len` long, so the
+            // access unit can be built in place (see `Direct`).
+            let k = h.data_shards as usize;
+            let direct = (h.fec_last_block == 0
+                && h.parity_shards() > 0
+                && shard_len >= rtp::SHORT_FRAME_HEADER_LEN)
+                .then(|| Direct {
+                    data: Vec::with_capacity(k * shard_len - rtp::SHORT_FRAME_HEADER_LEN),
+                    shard_len,
+                    contig: 0,
+                    sof: [0; rtp::SHORT_FRAME_HEADER_LEN],
+                });
             let partial = Partial {
                 frame_index: h.frame_index,
                 blocks,
                 first_packet_at: now,
                 rtp_timestamp: h.rtp_timestamp,
                 packets: 0,
+                direct,
             };
             let pos = self
                 .window
@@ -675,24 +785,36 @@ pub mod reassembly {
             }
             self.floor = Some(index);
 
-            // Rebuild missing data shards from parity (loss path only).
-            let mut recovered = 0usize;
-            for blk in &mut frame.blocks {
-                if blk.received_data < blk.data_shards {
-                    let missing = blk.data_shards - blk.received_data;
-                    if !self
-                        .fec
-                        .recover(blk.data_shards, blk.parity_shards, &mut blk.shards)
-                    {
+            let (au, recovered) = match frame.direct.take() {
+                Some(d) => match self.complete_direct(&mut frame, d, now) {
+                    Some(done) => done,
+                    None => {
                         self.recycle(frame);
                         self.declare_lost(index, index);
                         return None;
                     }
-                    recovered += missing;
+                },
+                None => {
+                    // Rebuild missing data shards from parity (loss path only).
+                    let mut recovered = 0usize;
+                    for blk in &mut frame.blocks {
+                        if blk.received_data < blk.data_shards {
+                            let missing = blk.data_shards - blk.received_data;
+                            if !self.fec.recover(
+                                blk.data_shards,
+                                blk.parity_shards,
+                                &mut blk.shards,
+                            ) {
+                                self.recycle(frame);
+                                self.declare_lost(index, index);
+                                return None;
+                            }
+                            recovered += missing;
+                        }
+                    }
+                    (self.assemble(&frame, recovered, now), recovered)
                 }
-            }
-
-            let au = self.assemble(&frame, recovered, now);
+            };
             self.recycle(frame);
             let au = match au {
                 Some(au) => au,
@@ -717,6 +839,88 @@ pub mod reassembly {
                 self.stats.shards_recovered += recovered as u64;
             }
             Some(au)
+        }
+
+        /// Finish a frame built in place: recover any missing data shards from
+        /// views into the buffer, append the shards still waiting in their
+        /// slots, trim the last shard's padding. `None` if recovery fails.
+        fn complete_direct(
+            &mut self,
+            frame: &mut Partial,
+            mut d: Direct,
+            now: Instant,
+        ) -> Option<(Option<AccessUnit>, usize)> {
+            let blk = frame.blocks.first_mut()?;
+            let (k, m, len) = (blk.data_shards, blk.parity_shards, d.shard_len);
+            let mut rebuilt: Vec<(usize, Vec<u8>)> = Vec::new();
+            if blk.received_data < k {
+                let head = (d.contig > 0).then(|| d.shard0());
+                let view: Vec<Option<&[u8]>> = (0..k + m)
+                    .map(|i| {
+                        if i == 0 && d.contig > 0 {
+                            head.as_deref()
+                        } else if i < d.contig {
+                            Some(d.shard(i))
+                        } else {
+                            blk.shards[i].as_deref()
+                        }
+                    })
+                    .collect();
+                rebuilt = self.fec.recover_views(k, m, &view)?;
+            }
+            let recovered = rebuilt.len();
+            let mut rebuilt = rebuilt.into_iter();
+            while d.contig < k {
+                match blk.shards[d.contig].take() {
+                    Some(buf) => {
+                        d.append(&buf);
+                        if self.pool.len() < POOL_LIMIT {
+                            self.pool.push(buf);
+                        }
+                    }
+                    None => {
+                        let (_, buf) = rebuilt.next()?;
+                        if buf.len() != len {
+                            return None;
+                        }
+                        d.append(&buf);
+                    }
+                }
+            }
+            // lastPayloadLen: the real bytes in the final (padded) data shard.
+            let sof = d.sof;
+            let last_payload_len = u16::from_le_bytes([sof[4], sof[5]]) as usize;
+            let end_last = if last_payload_len > 0 {
+                last_payload_len.min(len)
+            } else {
+                len
+            };
+            let header = rtp::SHORT_FRAME_HEADER_LEN;
+            let total = if k == 1 {
+                end_last.max(header) - header
+            } else {
+                (len - header) + (k - 2) * len + end_last
+            };
+            d.data.truncate(total);
+            Some((
+                Some(AccessUnit {
+                    codec: self.codec,
+                    frame_index: frame.frame_index,
+                    is_keyframe: sof[3] == FRAME_TYPE_IDR,
+                    host_latency_tenths_ms: u16::from_le_bytes([sof[1], sof[2]]),
+                    data: d.data,
+                    meta: FrameMeta {
+                        rtp_timestamp: frame.rtp_timestamp,
+                        first_packet_at: Some(frame.first_packet_at),
+                        complete_at: Some(now),
+                        packets: frame.packets,
+                        data_shards: k.min(u16::MAX as usize) as u16,
+                        recovered_shards: recovered.min(u16::MAX as usize) as u16,
+                        fec_blocks: 1,
+                    },
+                }),
+                recovered,
+            ))
         }
 
         /// Concatenate the frame's data shards (block 0 first) into one access
