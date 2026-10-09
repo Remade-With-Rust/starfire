@@ -151,32 +151,64 @@ impl Fec {
         if shards.len() < k + m {
             return false;
         }
-        let missing: Vec<usize> = (0..k).filter(|&i| shards[i].is_none()).collect();
-        if missing.is_empty() {
+        if (0..k).all(|i| shards[i].is_some()) {
             return true;
         }
-        if shards[..k + m].iter().filter(|s| s.is_some()).count() < k {
-            return false;
-        }
-        let Some(len) = shards.iter().flatten().map(|s| s.len()).next() else {
-            return false;
-        };
-        if shards[..k + m].iter().flatten().any(|s| s.len() != len) {
-            return false; // a malformed (short) shard cannot be mixed into the solve
-        }
-
-        let rebuilt = recover_missing(k, m, &missing, shards, len);
-        match rebuilt {
-            Some(out) => {
-                for (idx, buf) in missing.into_iter().zip(out) {
+        let view: Vec<Option<&[u8]>> = shards[..k + m].iter().map(|s| s.as_deref()).collect();
+        match self.recover_views(k, m, &view) {
+            Some(rebuilt) => {
+                for (idx, buf) in rebuilt {
                     shards[idx] = Some(buf);
                 }
-                self.fast_blocks += 1;
                 true
+            }
+            None => false,
+        }
+    }
+
+    /// [`recover`](Self::recover) over borrowed shards: `view` has
+    /// `data_shards + parity_shards` slots (`None` = lost). Returns the rebuilt
+    /// missing data shards as `(index, bytes)` in index order (empty when none
+    /// are missing), or `None` if the block cannot be recovered -- fewer than
+    /// `data_shards` survivors, or survivors of unequal length.
+    ///
+    /// For a caller whose surviving shards are not stored as separate owned
+    /// buffers (the depacketizer keeps in-order data shards in the access
+    /// unit's own buffer), so nothing has to be copied out just to recover.
+    pub fn recover_views(
+        &mut self,
+        data_shards: usize,
+        parity_shards: usize,
+        view: &[Option<&[u8]>],
+    ) -> Option<Vec<(usize, Vec<u8>)>> {
+        let (k, m) = (data_shards, parity_shards);
+        if view.len() < k + m {
+            return None;
+        }
+        let missing: Vec<usize> = (0..k).filter(|&i| view[i].is_none()).collect();
+        if missing.is_empty() {
+            return Some(Vec::new());
+        }
+        if view[..k + m].iter().filter(|s| s.is_some()).count() < k {
+            return None;
+        }
+        let len = view[..k + m].iter().flatten().map(|s| s.len()).next()?;
+        if view[..k + m].iter().flatten().any(|s| s.len() != len) {
+            return None; // a malformed (short) shard cannot be mixed into the solve
+        }
+        match recover_missing(k, m, &missing, view, len) {
+            Some(out) => {
+                self.fast_blocks += 1;
+                Some(missing.into_iter().zip(out).collect())
             }
             None => {
                 self.fallback_blocks += 1;
-                scalar::recover(k, m, shards)
+                let mut owned: Vec<Option<Vec<u8>>> =
+                    view[..k + m].iter().map(|s| s.map(<[u8]>::to_vec)).collect();
+                if !scalar::recover(k, m, &mut owned) {
+                    return None;
+                }
+                Some(missing.into_iter().map(|i| (i, owned[i].take().unwrap_or_default())).collect())
             }
         }
     }
@@ -200,7 +232,7 @@ fn recover_missing(
     k: usize,
     m: usize,
     missing: &[usize],
-    shards: &[Option<Vec<u8>>],
+    shards: &[Option<&[u8]>],
     len: usize,
 ) -> Option<Vec<Vec<u8>>> {
     use rusty_erasure::gf;
@@ -255,10 +287,10 @@ fn recover_missing(
     // this list by reallocation on every recovered block.
     let mut sources: Vec<&[u8]> = Vec::with_capacity(k);
     for &i in &present {
-        sources.push(shards[i].as_deref()?);
+        sources.push(shards[i]?);
     }
     for &j in &parity {
-        sources.push(shards[k + j].as_deref()?);
+        sources.push(shards[k + j]?);
     }
     let mut out: Vec<Vec<u8>> = vec![vec![0u8; len]; e];
     {
