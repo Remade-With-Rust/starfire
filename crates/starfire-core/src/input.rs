@@ -78,18 +78,22 @@ const MOUSE_REL_LEN: usize = 14;
 /// The `(dx, dy)` of an encoded relative mouse move, or `None` if `msg` is any
 /// other message.
 pub fn decode_mouse_rel(msg: &[u8]) -> Option<(i16, i16)> {
-    if msg.len() != MOUSE_REL_LEN
-        || msg[0..2] != CTRL_TYPE_INPUT.to_le_bytes()
-        || msg[2..6] != 8u32.to_be_bytes()
-        || msg[6..10] != MAGIC_MOUSE_MOVE_REL.to_le_bytes()
-    {
+    // One comparison against the constant header instead of three field checks.
+    let m: &[u8; MOUSE_REL_LEN] = msg.try_into().ok()?;
+    if m[..10] != MOUSE_REL_HEADER {
         return None;
     }
-    Some((
-        i16::from_be_bytes([msg[10], msg[11]]),
-        i16::from_be_bytes([msg[12], msg[13]]),
-    ))
+    Some((i16::from_be_bytes([m[10], m[11]]), i16::from_be_bytes([m[12], m[13]])))
 }
+
+/// The fixed first 10 bytes of every relative-mouse-move message: type (LE),
+/// size = 8 (BE), magic (LE).
+const MOUSE_REL_HEADER: [u8; 10] = {
+    let t = CTRL_TYPE_INPUT.to_le_bytes();
+    let n = 8u32.to_be_bytes();
+    let m = MAGIC_MOUSE_MOVE_REL.to_le_bytes();
+    [t[0], t[1], n[0], n[1], n[2], n[3], m[0], m[1], m[2], m[3]]
+};
 
 /// Fold relative mouse move `next` into `prev` (summing the deltas) when both
 /// are relative moves and the sum still fits. Returns `true` if `prev` now
