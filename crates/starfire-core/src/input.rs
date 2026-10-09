@@ -66,10 +66,13 @@ fn frame(magic: u32, body: &[u8]) -> Vec<u8> {
 /// Relative mouse motion (raw deltas) — the FPS path: no acceleration, no
 /// screen-edge clamping; send one per OS motion event for lowest latency.
 pub fn mouse_move_rel(dx: i16, dy: i16) -> Vec<u8> {
-    let mut body = [0u8; 4];
-    body[0..2].copy_from_slice(&dx.to_be_bytes());
-    body[2..4].copy_from_slice(&dy.to_be_bytes());
-    frame(MAGIC_MOUSE_MOVE_REL, &body)
+    // The most frequent message, so it is built whole from its constant
+    // header rather than through the generic framer.
+    let mut m = [0u8; MOUSE_REL_LEN];
+    m[..10].copy_from_slice(&MOUSE_REL_HEADER);
+    m[10..12].copy_from_slice(&dx.to_be_bytes());
+    m[12..14].copy_from_slice(&dy.to_be_bytes());
+    m.to_vec()
 }
 
 /// Length of a relative-mouse-move message: type(2) + size(4) + magic(4) + dx(2) + dy(2).
