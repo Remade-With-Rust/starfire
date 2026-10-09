@@ -437,6 +437,9 @@ pub mod reassembly {
 
     impl Direct {
         /// Append data shard `contig` (which must be `payload`'s index).
+        /// `#[inline]` (a hint: `inline(always)` measured worse on both client
+        /// instruments -- the cold call sites pay for it).
+        #[inline]
         fn append(&mut self, payload: &[u8]) {
             if self.contig == 0 {
                 let (h, rest) = payload.split_at(rtp::SHORT_FRAME_HEADER_LEN);
