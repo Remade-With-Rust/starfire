@@ -265,10 +265,11 @@ impl TransitTracker {
     /// frame's delay above the window floor (zero for the fastest frame).
     pub fn observe(&mut self, sender_ts: u32, arrival: Instant) -> Duration {
         let (t0, ts0) = *self.epoch.get_or_insert((arrival, sender_ts));
-        let local_ns = arrival
-            .saturating_duration_since(t0)
-            .as_nanos()
-            .min(i64::MAX as u128) as i64;
+        // Nanoseconds since the epoch in i64 arithmetic (`as_nanos` is u128);
+        // the seconds clamp keeps it in range for ~292 years of uptime.
+        let since = arrival.saturating_duration_since(t0);
+        let local_ns =
+            since.as_secs().min(9_000_000_000) as i64 * 1_000_000_000 + since.subsec_nanos() as i64;
         let local_us = local_ns / 1_000;
         let sender_us = media_clock::delta_us(ts0, sender_ts);
         let transit = local_us - sender_us;
