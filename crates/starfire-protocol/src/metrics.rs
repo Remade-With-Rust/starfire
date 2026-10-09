@@ -331,7 +331,7 @@ mod tests {
             x = x
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
-            (x >> 33) as u64
+            x >> 33
         };
         let (mut at, mut ts) = (Duration::ZERO, 0u32);
         for i in 0..5_000u32 {
