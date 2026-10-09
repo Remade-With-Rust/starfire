@@ -16,7 +16,6 @@
 //!   timestamp field; observed on the wire from a Sunshine capture, see
 //!   `tests/fixtures/video/stream-hevc.fix`).
 
-use std::collections::VecDeque;
 use std::fmt;
 use std::time::{Duration, Instant};
 
@@ -241,7 +240,12 @@ pub struct TransitTracker {
     /// since the epoch: transit values strictly increase front to back, so the
     /// front is the window minimum. Integer times keep each eviction test a
     /// subtraction instead of an `Instant` difference.
-    mins: VecDeque<(i64, i64)>,
+    ///
+    /// Held in a `Vec` read from `head`: entries leave the front by advancing
+    /// `head` and the dead prefix is dropped once it is half the vector, so
+    /// every operation is a plain index (no ring-buffer wrap arithmetic).
+    mins: Vec<(i64, i64)>,
+    head: usize,
 }
 
 impl TransitTracker {
@@ -257,7 +261,8 @@ impl TransitTracker {
         Self {
             window_ns: window.as_nanos().min(i64::MAX as u128) as i64,
             epoch: None,
-            mins: VecDeque::new(),
+            mins: Vec::new(),
+            head: 0,
         }
     }
 
@@ -276,22 +281,27 @@ impl TransitTracker {
 
         // Same test as `arrival - at > window` on Instants (an arrival before
         // `at` is a negative difference, never past the window).
-        while let Some(&(at, _)) = self.mins.front() {
+        while let Some(&(at, _)) = self.mins.get(self.head) {
             if local_ns - at > self.window_ns {
-                self.mins.pop_front();
+                self.head += 1;
             } else {
                 break;
             }
         }
-        while let Some(&(_, t)) = self.mins.back() {
-            if t >= transit {
-                self.mins.pop_back();
-            } else {
-                break;
+        while self.mins.len() > self.head {
+            match self.mins.last() {
+                Some(&(_, t)) if t >= transit => {
+                    self.mins.pop();
+                }
+                _ => break,
             }
         }
-        self.mins.push_back((local_ns, transit));
-        let floor = self.mins.front().map(|&(_, t)| t).unwrap_or(transit);
+        if self.head >= 64 && self.head * 2 >= self.mins.len() {
+            self.mins.drain(..self.head);
+            self.head = 0;
+        }
+        self.mins.push((local_ns, transit));
+        let floor = self.mins.get(self.head).map_or(transit, |&(_, t)| t);
         Duration::from_micros((transit - floor).max(0) as u64)
     }
 }
@@ -306,6 +316,46 @@ impl Default for TransitTracker {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// The tracker's floor equals a brute-force minimum over every frame still
+    /// inside the window, across long runs (well past the queue's compaction
+    /// threshold) with jittery arrivals and media timestamps.
+    #[test]
+    fn transit_floor_matches_brute_force_over_long_runs() {
+        let t0 = Instant::now();
+        let window = Duration::from_millis(500);
+        let mut tracker = TransitTracker::with_window(window);
+        let mut seen: Vec<(Duration, i64)> = Vec::new();
+        let mut x: u64 = 7;
+        let mut next = || {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (x >> 33) as u64
+        };
+        let (mut at, mut ts) = (Duration::ZERO, 0u32);
+        for i in 0..5_000u32 {
+            at += Duration::from_micros(4_000 + next() % 9_000);
+            // A media clock running behind the arrivals on average, with
+            // jitter either way: transit mostly rises, so the queue grows well
+            // past its compaction threshold.
+            ts = ts.wrapping_add(500 + (next() % 400) as u32);
+            let got = tracker.observe(ts, t0 + at);
+            let transit = at.as_micros() as i64 - media_clock::delta_us(0, ts);
+            seen.push((at, transit));
+            let floor = seen
+                .iter()
+                .filter(|&&(a, _)| at - a <= window)
+                .map(|&(_, t)| t)
+                .min()
+                .unwrap_or(transit);
+            assert_eq!(
+                got,
+                Duration::from_micros((transit - floor).max(0) as u64),
+                "frame {i}"
+            );
+        }
+    }
 
     /// `record` stores exactly what `as_micros` (saturated to u32) gives.
     #[test]
