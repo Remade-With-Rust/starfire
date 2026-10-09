@@ -105,7 +105,11 @@ impl LatencySeries {
 
     /// Record one sample. Saturates at `u32::MAX` microseconds (~71 minutes).
     pub fn record(&mut self, d: Duration) {
-        self.record_us(d.as_micros().min(u32::MAX as u128) as u64);
+        // Whole microseconds in u64 arithmetic (`as_micros` works in u128).
+        // Anything past u32::MAX us saturates in record_us anyway, so clamping
+        // the seconds first keeps the multiply from overflowing.
+        let secs = d.as_secs().min(u32::MAX as u64);
+        self.record_us(secs * 1_000_000 + d.subsec_micros() as u64);
     }
 
     /// Record one sample given in microseconds.
@@ -301,6 +305,27 @@ impl Default for TransitTracker {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// `record` stores exactly what `as_micros` (saturated to u32) gives.
+    #[test]
+    fn record_matches_as_micros() {
+        for d in [
+            Duration::ZERO,
+            Duration::from_nanos(999),
+            Duration::from_nanos(1_000),
+            Duration::from_micros(1_234_567),
+            Duration::from_secs(4_294),
+            Duration::from_secs(4_295),
+            Duration::new(4_294, 967_295_999),
+            Duration::new(4_294, 967_296_000),
+            Duration::MAX,
+        ] {
+            let mut a = LatencySeries::with_window(1);
+            a.record(d);
+            let want = d.as_micros().min(u32::MAX as u128) as u32;
+            assert_eq!(a.summary().max_us, want, "{d:?}");
+        }
+    }
 
     /// The selection-based percentiles equal a full sort's, for every window
     /// size from 1 up and for heavily duplicated samples.
