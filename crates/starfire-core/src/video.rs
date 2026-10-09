@@ -477,12 +477,6 @@ pub mod reassembly {
         }
     }
 
-    impl Partial {
-        fn complete(&self) -> bool {
-            self.blocks.iter().all(Block::complete)
-        }
-    }
-
     /// Streaming reassembler. Feed every received video datagram via
     /// [`push`](Depacketizer::push); it yields an [`AccessUnit`] the moment a
     /// frame is recoverable (all data shards present, or enough data + parity
@@ -685,7 +679,9 @@ pub mod reassembly {
             *packets = packets.saturating_add(1);
             self.stats.packets += 1;
 
-            if self.window[pos].complete() {
+            // Tested on the frame already in hand, not by indexing the window
+            // (a VecDeque index computation) a second time.
+            if blocks.iter().all(Block::complete) {
                 self.finish(pos, now)
             } else {
                 None
