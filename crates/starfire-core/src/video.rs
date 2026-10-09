@@ -329,6 +329,9 @@ pub mod reassembly {
     /// Recycled shard buffers kept for reuse (bounds the pool's memory).
     const POOL_LIMIT: usize = 1024;
 
+    /// Retired frames' block lists kept for reuse: one more than the window.
+    const SPARE_BLOCK_LISTS: usize = WINDOW_FRAMES + 1;
+
     /// A FEC block may hold up to four independent blocks per frame (2-bit index).
     const MAX_BLOCKS: usize = 4;
 
@@ -507,6 +510,9 @@ pub mod reassembly {
         pending_loss: Option<LossEvent>,
         fec: Fec,
         pool: Vec<Vec<u8>>,
+        /// Block lists of retired frames, emptied, kept to be reused by the next
+        /// frame (with each block's slot vector) instead of reallocated.
+        spare_blocks: Vec<Vec<Block>>,
         stats: ReassemblyStats,
     }
 
@@ -522,6 +528,7 @@ pub mod reassembly {
                 pending_loss: None,
                 fec: Fec::new(),
                 pool: Vec::new(),
+                spare_blocks: Vec::new(),
                 stats: ReassemblyStats::default(),
             }
         }
@@ -712,8 +719,10 @@ pub mod reassembly {
                 }
                 self.give_up_through(oldest);
             }
-            let mut blocks = Vec::with_capacity(h.fec_last_block as usize + 1);
-            blocks.resize_with(h.fec_last_block as usize + 1, Block::default);
+            let n_blocks = h.fec_last_block as usize + 1;
+            let mut blocks = self.spare_blocks.pop().unwrap_or_default();
+            blocks.truncate(n_blocks);
+            blocks.resize_with(n_blocks, Block::default);
             // A single protected block: every shard is `shard_len` long, so the
             // access unit can be built in place (see `Direct`).
             let k = h.data_shards as usize;
@@ -999,12 +1008,23 @@ pub mod reassembly {
 
         /// Return a retired frame's shard buffers to the pool.
         fn recycle(&mut self, frame: Partial) {
-            for blk in frame.blocks {
-                for buf in blk.shards.into_iter().flatten() {
+            let mut blocks = frame.blocks;
+            for blk in &mut blocks {
+                for buf in blk.shards.drain(..).flatten() {
                     if self.pool.len() < POOL_LIMIT {
                         self.pool.push(buf);
                     }
                 }
+                // Back to "no packet seen yet", keeping the slot vector's
+                // allocation for the next frame.
+                blk.data_shards = 0;
+                blk.parity_shards = 0;
+                blk.fec_percentage = 0;
+                blk.received = 0;
+                blk.received_data = 0;
+            }
+            if self.spare_blocks.len() < SPARE_BLOCK_LISTS {
+                self.spare_blocks.push(blocks);
             }
         }
 
