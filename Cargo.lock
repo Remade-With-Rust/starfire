@@ -2006,15 +2006,6 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
 name = "quick-xml"
-version = "0.36.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f7649a7b4df05aed9ea7ec6f628c67c9953a43869b8bc50929569b2999d443fe"
-dependencies = [
- "memchr",
-]
-
-[[package]]
-name = "quick-xml"
 version = "0.39.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdcc8dd4e2f670d309a5f0e83fe36dfdc05af317008fea29144da1a2ac858e5e"
@@ -2308,6 +2299,38 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61c237be51374ef0b897e4a9205966b9941ce89d063e6e5d63bf96d8611580dc"
 
 [[package]]
+name = "rusty_xml-parser"
+version = "0.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0badeb1b88267fcb37dc666672624764dd539de0665bfecf2ee106a782a1def7"
+dependencies = [
+ "rusty_xml-sax",
+ "rusty_xml-tree",
+]
+
+[[package]]
+name = "rusty_xml-reader"
+version = "0.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "adcca0cf43c17f1196586554f8a9e8e5f96d64915c076ec02878e08a6628333e"
+dependencies = [
+ "rusty_xml-parser",
+ "rusty_xml-tree",
+]
+
+[[package]]
+name = "rusty_xml-sax"
+version = "0.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "763ed3ed5d0a6e9a8ae19391460de0674dac79ee9e6da526353825e1feea6a8d"
+
+[[package]]
+name = "rusty_xml-tree"
+version = "0.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "810758c2b1f2e476c5cc2a6c7fe92979b2a053f878e46c9d421255761290629e"
+
+[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2582,11 +2605,11 @@ dependencies = [
  "aes-gcm",
  "getrandom 0.2.17",
  "p256",
- "quick-xml 0.36.2",
  "rcgen",
  "rustls",
  "rustls-pki-types",
  "rusty_enet",
+ "rusty_xml-reader",
  "sha2",
  "socket2",
  "starfire-protocol",
@@ -2628,9 +2651,9 @@ dependencies = [
  "aes",
  "getrandom 0.2.17",
  "p256",
- "quick-xml 0.36.2",
  "rcgen",
  "rusty_erasure",
+ "rusty_xml-reader",
  "sha2",
  "thiserror 2.0.18",
  "x509-parser",
@@ -3133,7 +3156,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c324a910fd86ebdc364a3e61ec1f11737d3b1d6c273c0239ee8ff4bc0d24b4a"
 dependencies = [
  "proc-macro2",
- "quick-xml 0.39.4",
+ "quick-xml",
  "quote",
 ]
 
