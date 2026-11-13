@@ -18,7 +18,7 @@ starfire-protocol = { path = "../starfire-protocol" } # shared wire layer (also 
 starfire-rt = { path = "../starfire-rt" } # scheduling hints for the receive/control threads
 thiserror = { workspace = true }
 tracing = { workspace = true }
-quick-xml = { workspace = true } # /serverinfo + /applist GameStream XML (F1, F3, F4)
+rusty_xml-reader = { workspace = true } # /serverinfo + /applist GameStream XML (F1, F3, F4)
 sha2 = { workspace = true }      # pairing PIN KDF + challenge hash chain (F2)
 aes = { workspace = true }       # AES-128-ECB pairing challenge cipher (F2)
 rcgen = { workspace = true }     # self-signed client identity cert (F2)
@@ -30,9 +30,10 @@ rustls-pki-types = { workspace = true } # PEM cert/key parsing (F3)
 rusty_enet = { workspace = true } # reliable-UDP control channel (F6)
 aes-gcm = { workspace = true }   # AES-GCM control/input/media encryption (F6+)
 socket2 = { workspace = true }  # media-socket receive buffer sizing (session)
-# Video FEC is a first-party nanors-compatible Cauchy RS (video::fec) — no crate.
+# Video FEC lives in starfire-protocol::fec: our nanors-compatible Cauchy matrix
+# over rusty_erasure's SIMD kernels, gated against a first-party scalar oracle.
 # Further protocol-layer deps are added as each layer lands (docs/05-build-plan.md):
-#   reed-solomon-erasure, aes-gcm, rusty_enet, rcgen, rsa, x509-parser, rustls…
+#   aes-gcm, rusty_enet, rcgen, rsa, x509-parser, rustls…
 
 [dev-dependencies]
 starfire-testkit = { path = "../starfire-testkit" }

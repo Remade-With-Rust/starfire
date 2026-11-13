@@ -72,47 +72,52 @@ pub struct ServerInfo {
 impl ServerInfo {
     /// Parse the GameStream `/serverinfo` XML document.
     pub fn parse(xml: &[u8]) -> crate::Result<Self> {
-        use quick_xml::events::Event;
-        use quick_xml::Reader;
+        use rusty_xml_reader::{ReaderType, XmlTextReader};
 
-        let mut reader = Reader::from_reader(xml);
-        let mut buf = Vec::new();
+        let mut reader =
+            XmlTextReader::xml_reader_for_memory(xml, None, None, 0).map_err(xml_err)?;
         let mut stack: Vec<String> = Vec::new();
         let mut fields: BTreeMap<String, String> = BTreeMap::new();
         let mut status_code: Option<u16> = None;
 
+        // libxml2 `read()`: 1 = a node, 0 = end of document, -1 = error.
         loop {
-            match reader.read_event_into(&mut buf).map_err(xml_err)? {
-                Event::Start(e) => {
-                    let name = local_name(e.name().into_inner());
+            match reader.read() {
+                1 => {}
+                0 => break,
+                _ => return Err(xml_err("malformed document")),
+            }
+            match reader.node_type() {
+                ReaderType::Element => {
+                    // The reader strips the `ns:` prefix itself.
+                    let name = reader.local_name().unwrap_or_default().to_string();
                     if name == "root" {
-                        status_code = attr_u16(&e, b"status_code");
+                        status_code = reader
+                            .get_attribute("status_code")
+                            .and_then(|v| v.parse().ok());
                     }
-                    stack.push(name);
-                }
-                Event::Empty(e) => {
-                    let name = local_name(e.name().into_inner());
-                    if name == "root" {
-                        status_code = attr_u16(&e, b"status_code");
+                    // `<tag/>` raises no EndElement: record it and do not push.
+                    if reader.is_empty_element() {
+                        fields.entry(name).or_default();
+                    } else {
+                        stack.push(name);
                     }
-                    fields.entry(name).or_default();
                 }
-                Event::Text(e) => {
-                    let text = e.unescape().map_err(xml_err)?;
-                    let trimmed = text.trim();
-                    if !trimmed.is_empty() {
-                        if let Some(current) = stack.last() {
-                            fields.insert(current.clone(), trimmed.to_string());
+                ReaderType::Text | ReaderType::CData => {
+                    if let Some(text) = reader.value() {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() {
+                            if let Some(current) = stack.last() {
+                                fields.insert(current.clone(), trimmed.to_string());
+                            }
                         }
                     }
                 }
-                Event::End(_) => {
+                ReaderType::EndElement => {
                     stack.pop();
                 }
-                Event::Eof => break,
                 _ => {}
             }
-            buf.clear();
         }
 
         Ok(Self {
@@ -157,19 +162,6 @@ impl ServerInfo {
 
 fn parse_field<T: std::str::FromStr>(fields: &BTreeMap<String, String>, key: &str) -> Option<T> {
     fields.get(key).and_then(|s| s.parse().ok())
-}
-
-/// Strip any `ns:` prefix from an element name.
-fn local_name(name: &[u8]) -> String {
-    let s = String::from_utf8_lossy(name);
-    s.rsplit(':').next().unwrap_or(&s).to_string()
-}
-
-fn attr_u16(e: &quick_xml::events::BytesStart, key: &[u8]) -> Option<u16> {
-    e.attributes()
-        .flatten()
-        .find(|a| a.key.into_inner() == key)
-        .and_then(|a| std::str::from_utf8(a.value.as_ref()).ok()?.parse().ok())
 }
 
 fn xml_err<E: std::fmt::Display>(e: E) -> crate::Error {
