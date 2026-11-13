@@ -1,0 +1,10 @@
+Starfire
+Copyright 2026 Remade With Rust contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+Starfire is a clean-room implementation of a client for the Sunshine/GameStream
+protocol, developed under docs/clean-room-policy.md; it is not derived from
+Moonlight or Sunshine source code. Third-party dependencies are listed in
+Cargo.lock and keep their own licences; the cargo-deny gate (deny.toml)
+restricts them to permissive ones.

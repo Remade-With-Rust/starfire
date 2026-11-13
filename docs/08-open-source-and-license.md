@@ -4,7 +4,8 @@
 
 - **Apache-2.0** for the core. The patent grant matters in codec/protocol
   territory — that's why Apache over MIT/BSD here. Apply it consistently across
-  the whole tree.
+  the whole tree. The full licence text is [`LICENSE`](../LICENSE) at the repo
+  root (Apache-2.0 §4(a)), with attribution in [`NOTICE`](../NOTICE).
 - **No copyleft anywhere.** Zero GPL/LGPL (or other reciprocal) dependencies.
 - Every source file carries the SPDX header: `// SPDX-License-Identifier: Apache-2.0`
   plus, for protocol modules, the clean-room provenance line
@@ -23,12 +24,12 @@
 | Need | Crate | License |
 |------|-------|---------|
 | Control transport | `rusty_enet` | MIT |
-| FEC | `reed-solomon-erasure` | MIT/Apache |
+| FEC | `rusty_erasure` (kernels; our nanors-compatible matrix) | MIT/Apache |
 | Audio decode / output | `opus`/`audiopus` / `cpal` | BSD / Apache·MIT |
 | SW video decode | `dav1d` | BSD |
 | Crypto | `aes`/`aes-gcm`, `ring`, `sha2` | permissive |
 | TLS / certs | `rcgen`, `rustls` | permissive |
-| XML | `quick-xml` | MIT |
+| XML | `rusty_xml-reader` | MIT/Apache |
 | mDNS | (e.g.) `mdns-sd` | MIT |
 
 Confirm every actual license via `cargo-deny`, not this table.
