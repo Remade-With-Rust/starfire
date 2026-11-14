@@ -33,7 +33,9 @@ use starfire_core::video::Codec;
 use starfire_decode::VideoFrame;
 use starfire_render::{new_for_window, ActiveRenderer, Renderer};
 use winit::application::ApplicationHandler;
-use winit::event::{DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{
+    DeviceEvent, DeviceId, ElementState, MouseButton, MouseScrollDelta, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
@@ -177,7 +179,8 @@ fn display_refresh_hz() -> Option<u32> {
     // maximumFramesPerSecond returns NSInteger.
     unsafe {
         let send: extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc_msgSend as *const ());
-        let send_i: extern "C" fn(Id, Sel) -> isize = std::mem::transmute(objc_msgSend as *const ());
+        let send_i: extern "C" fn(Id, Sel) -> isize =
+            std::mem::transmute(objc_msgSend as *const ());
         let class = objc_getClass(c"NSScreen".as_ptr());
         if class.is_null() {
             return None;
@@ -663,31 +666,86 @@ fn map_button(b: MouseButton) -> Option<SfButton> {
 fn vk_from_keycode(code: KeyCode) -> Option<u16> {
     use KeyCode as K;
     Some(match code {
-        K::KeyA => 0x41, K::KeyB => 0x42, K::KeyC => 0x43, K::KeyD => 0x44,
-        K::KeyE => 0x45, K::KeyF => 0x46, K::KeyG => 0x47, K::KeyH => 0x48,
-        K::KeyI => 0x49, K::KeyJ => 0x4A, K::KeyK => 0x4B, K::KeyL => 0x4C,
-        K::KeyM => 0x4D, K::KeyN => 0x4E, K::KeyO => 0x4F, K::KeyP => 0x50,
-        K::KeyQ => 0x51, K::KeyR => 0x52, K::KeyS => 0x53, K::KeyT => 0x54,
-        K::KeyU => 0x55, K::KeyV => 0x56, K::KeyW => 0x57, K::KeyX => 0x58,
-        K::KeyY => 0x59, K::KeyZ => 0x5A,
-        K::Digit0 => 0x30, K::Digit1 => 0x31, K::Digit2 => 0x32, K::Digit3 => 0x33,
-        K::Digit4 => 0x34, K::Digit5 => 0x35, K::Digit6 => 0x36, K::Digit7 => 0x37,
-        K::Digit8 => 0x38, K::Digit9 => 0x39,
-        K::F1 => 0x70, K::F2 => 0x71, K::F3 => 0x72, K::F4 => 0x73,
-        K::F5 => 0x74, K::F6 => 0x75, K::F7 => 0x76, K::F8 => 0x77,
-        K::F9 => 0x78, K::F10 => 0x79, K::F11 => 0x7A, K::F12 => 0x7B,
-        K::Escape => 0x1B, K::Space => 0x20, K::Enter => 0x0D, K::Backspace => 0x08,
-        K::Tab => 0x09, K::CapsLock => 0x14,
+        K::KeyA => 0x41,
+        K::KeyB => 0x42,
+        K::KeyC => 0x43,
+        K::KeyD => 0x44,
+        K::KeyE => 0x45,
+        K::KeyF => 0x46,
+        K::KeyG => 0x47,
+        K::KeyH => 0x48,
+        K::KeyI => 0x49,
+        K::KeyJ => 0x4A,
+        K::KeyK => 0x4B,
+        K::KeyL => 0x4C,
+        K::KeyM => 0x4D,
+        K::KeyN => 0x4E,
+        K::KeyO => 0x4F,
+        K::KeyP => 0x50,
+        K::KeyQ => 0x51,
+        K::KeyR => 0x52,
+        K::KeyS => 0x53,
+        K::KeyT => 0x54,
+        K::KeyU => 0x55,
+        K::KeyV => 0x56,
+        K::KeyW => 0x57,
+        K::KeyX => 0x58,
+        K::KeyY => 0x59,
+        K::KeyZ => 0x5A,
+        K::Digit0 => 0x30,
+        K::Digit1 => 0x31,
+        K::Digit2 => 0x32,
+        K::Digit3 => 0x33,
+        K::Digit4 => 0x34,
+        K::Digit5 => 0x35,
+        K::Digit6 => 0x36,
+        K::Digit7 => 0x37,
+        K::Digit8 => 0x38,
+        K::Digit9 => 0x39,
+        K::F1 => 0x70,
+        K::F2 => 0x71,
+        K::F3 => 0x72,
+        K::F4 => 0x73,
+        K::F5 => 0x74,
+        K::F6 => 0x75,
+        K::F7 => 0x76,
+        K::F8 => 0x77,
+        K::F9 => 0x78,
+        K::F10 => 0x79,
+        K::F11 => 0x7A,
+        K::F12 => 0x7B,
+        K::Escape => 0x1B,
+        K::Space => 0x20,
+        K::Enter => 0x0D,
+        K::Backspace => 0x08,
+        K::Tab => 0x09,
+        K::CapsLock => 0x14,
         K::ShiftLeft | K::ShiftRight => 0x10,
         K::ControlLeft | K::ControlRight => 0x11,
         K::AltLeft | K::AltRight => 0x12,
-        K::SuperLeft => 0x5B, K::SuperRight => 0x5C,
-        K::ArrowLeft => 0x25, K::ArrowUp => 0x26, K::ArrowRight => 0x27, K::ArrowDown => 0x28,
-        K::Home => 0x24, K::End => 0x23, K::PageUp => 0x21, K::PageDown => 0x22,
-        K::Insert => 0x2D, K::Delete => 0x2E,
-        K::Minus => 0xBD, K::Equal => 0xBB, K::BracketLeft => 0xDB, K::BracketRight => 0xDD,
-        K::Backslash => 0xDC, K::Semicolon => 0xBA, K::Quote => 0xDE, K::Backquote => 0xC0,
-        K::Comma => 0xBC, K::Period => 0xBE, K::Slash => 0xBF,
+        K::SuperLeft => 0x5B,
+        K::SuperRight => 0x5C,
+        K::ArrowLeft => 0x25,
+        K::ArrowUp => 0x26,
+        K::ArrowRight => 0x27,
+        K::ArrowDown => 0x28,
+        K::Home => 0x24,
+        K::End => 0x23,
+        K::PageUp => 0x21,
+        K::PageDown => 0x22,
+        K::Insert => 0x2D,
+        K::Delete => 0x2E,
+        K::Minus => 0xBD,
+        K::Equal => 0xBB,
+        K::BracketLeft => 0xDB,
+        K::BracketRight => 0xDD,
+        K::Backslash => 0xDC,
+        K::Semicolon => 0xBA,
+        K::Quote => 0xDE,
+        K::Backquote => 0xC0,
+        K::Comma => 0xBC,
+        K::Period => 0xBE,
+        K::Slash => 0xBF,
         _ => return None,
     })
 }

@@ -270,7 +270,10 @@ impl RtspClient {
             "a=x-nv-audio.surround.AudioQuality:0".to_string(),
             "a=x-ml-general.featureFlags:0".to_string(),
             format!("a=x-ml-video.configuredBitrateKbps:{kbps}"),
-            format!("a=x-ss-general.encryptionEnabled:{}", cfg.encryption_enabled),
+            format!(
+                "a=x-ss-general.encryptionEnabled:{}",
+                cfg.encryption_enabled
+            ),
             "a=x-ss-video[0].chromaSamplingType:0".to_string(),
             "a=x-ss-video[0].intraRefresh:0".to_string(),
         ];
@@ -293,7 +296,11 @@ impl RtspClient {
         let resp = self.request(
             "ANNOUNCE",
             None,
-            &[("Content-type", "application/sdp"), ("Session", session_id), GS],
+            &[
+                ("Content-type", "application/sdp"),
+                ("Session", session_id),
+                GS,
+            ],
             sdp.as_bytes(),
         )?;
         if resp.status != 200 {

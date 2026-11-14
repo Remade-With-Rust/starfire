@@ -102,10 +102,7 @@ fn start_code_positions(data: &[u8]) -> Vec<(usize, usize)> {
 /// - `parameter_sets`: each VPS/SPS/PPS NAL's bytes (start code stripped), in
 ///   stream order — feed these to the format-description builder.
 /// - `sample_data`: the slice/VCL NALs concatenated as `[len:u32_be][nal]...`.
-pub fn to_length_prefixed(
-    data: &[u8],
-    codec: NalCodec,
-) -> (Vec<Vec<u8>>, Vec<u8>) {
+pub fn to_length_prefixed(data: &[u8], codec: NalCodec) -> (Vec<Vec<u8>>, Vec<u8>) {
     let mut param_sets = Vec::new();
     let mut sample = Vec::new();
     for nal in iter_nals(data, codec) {

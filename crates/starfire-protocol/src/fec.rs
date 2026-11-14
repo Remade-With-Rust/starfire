@@ -203,12 +203,19 @@ impl Fec {
             }
             None => {
                 self.fallback_blocks += 1;
-                let mut owned: Vec<Option<Vec<u8>>> =
-                    view[..k + m].iter().map(|s| s.map(<[u8]>::to_vec)).collect();
+                let mut owned: Vec<Option<Vec<u8>>> = view[..k + m]
+                    .iter()
+                    .map(|s| s.map(<[u8]>::to_vec))
+                    .collect();
                 if !scalar::recover(k, m, &mut owned) {
                     return None;
                 }
-                Some(missing.into_iter().map(|i| (i, owned[i].take().unwrap_or_default())).collect())
+                Some(
+                    missing
+                        .into_iter()
+                        .map(|i| (i, owned[i].take().unwrap_or_default()))
+                        .collect(),
+                )
             }
         }
     }

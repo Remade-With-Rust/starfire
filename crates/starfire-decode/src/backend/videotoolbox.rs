@@ -50,7 +50,7 @@ use starfire_core::video::{AccessUnit, Codec};
 
 use crate::annexb::{self, NalCodec};
 use crate::frame::{ColorSpace, PixelFormat, Plane, VideoFrame};
-use crate::{Decoder, DecodeError};
+use crate::{DecodeError, Decoder};
 
 // ---------------------------------------------------------------------------
 // Minimal CoreFoundation / CoreMedia / CoreVideo / VideoToolbox FFI.
@@ -321,8 +321,9 @@ extern "C" {
         infoFlagsOut: *mut u32,
     ) -> OSStatus;
 
-    fn VTDecompressionSessionWaitForAsynchronousFrames(session: VTDecompressionSessionRef)
-        -> OSStatus;
+    fn VTDecompressionSessionWaitForAsynchronousFrames(
+        session: VTDecompressionSessionRef,
+    ) -> OSStatus;
 
     fn VTDecompressionSessionInvalidate(session: VTDecompressionSessionRef);
 }
@@ -410,7 +411,8 @@ impl VideoToolboxDecoder {
         }
         if param_sets.is_empty() {
             return Err(DecodeError::Failed(
-                "no parameter sets seen yet; need a keyframe to build the format description".into(),
+                "no parameter sets seen yet; need a keyframe to build the format description"
+                    .into(),
             ));
         }
 
@@ -511,12 +513,7 @@ impl VideoToolboxDecoder {
             )));
         }
         let status = unsafe {
-            CMBlockBufferReplaceDataBytes(
-                sample.as_ptr() as *const c_void,
-                block,
-                0,
-                sample.len(),
-            )
+            CMBlockBufferReplaceDataBytes(sample.as_ptr() as *const c_void, block, 0, sample.len())
         };
         if status != noErr {
             unsafe { CFRelease(block) };

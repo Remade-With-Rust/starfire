@@ -370,10 +370,7 @@ impl MetalRenderer {
         }
 
         // CAMetalLayer, attached to the NSView.
-        let layer = msg(
-            msg(class(c"CAMetalLayer"), sel(c"alloc")),
-            sel(c"init"),
-        );
+        let layer = msg(msg(class(c"CAMetalLayer"), sel(c"alloc")), sel(c"init"));
         msg_void_id(layer, sel(c"setDevice:"), device);
         msg_void_u64(layer, sel(c"setPixelFormat:"), MTL_PF_BGRA8_UNORM_SRGB);
         msg_void_bool(layer, sel(c"setFramebufferOnly:"), true);
@@ -418,8 +415,14 @@ impl MetalRenderer {
             eprintln!(
                 "[renderdbg] Metal layer attached to NSView {:p}; view bounds={}x{} \
                  layer.frame={}x{} drawableSize={}x{} contentsScale={}",
-                ns_view, bounds.size.width, bounds.size.height,
-                bounds.size.width, bounds.size.height, width, height, scale
+                ns_view,
+                bounds.size.width,
+                bounds.size.height,
+                bounds.size.width,
+                bounds.size.height,
+                width,
+                height,
+                scale
             );
         }
 
@@ -524,7 +527,9 @@ impl Renderer for MetalRenderer {
                     self.plane_texture(pb, MTL_PF_RG8_UNORM, cw, ch, 1)
                 else {
                     CFRelease(tex_y);
-                    return Err(RenderError::Failed("CbCr plane texture import failed".into()));
+                    return Err(RenderError::Failed(
+                        "CbCr plane texture import failed".into(),
+                    ));
                 };
 
                 if log {

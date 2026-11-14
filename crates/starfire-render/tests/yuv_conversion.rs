@@ -141,7 +141,12 @@ fn nv12_known_anchor_colors() {
     let pipeline = gpu::YuvPipeline::new(&device, wgpu::TextureFormat::Rgba8Unorm);
 
     // Limited-range black -> (0,0,0), white -> (255,255,255).
-    let black = render_center(&device, &queue, &pipeline, &solid_nv12(32, 32, 16, 128, 128));
+    let black = render_center(
+        &device,
+        &queue,
+        &pipeline,
+        &solid_nv12(32, 32, 16, 128, 128),
+    );
     assert!(close(black, [0, 0, 0], 2), "black -> {black:?}");
 
     let white = render_center(
