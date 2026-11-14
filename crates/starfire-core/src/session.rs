@@ -797,29 +797,34 @@ mod tests {
     }
 
     /// Returned buffers are reused, so steady-state receive does not allocate.
+    ///
+    /// Asserted on allocation count, not on *which* buffer comes back when: the
+    /// pool is LIFO and the receive thread re-pools its held buffer on every
+    /// `RECV_TICK` timeout, so the order buffers resurface in depends on
+    /// scheduling. (The old form — "this exact buffer returns within three
+    /// datagrams" — failed ~1 run in 150.) Pooled buffers are never freed, so
+    /// distinct addresses are distinct live allocations: with recycling, a
+    /// ping-pong stream needs at most one buffer in the receive thread, one in
+    /// flight and one in the pool. Without it, every datagram allocates afresh
+    /// (with recycling disabled this test sees ~10 distinct addresses in 20,
+    /// fewer than 20 only because the allocator reuses freed blocks).
     #[test]
     fn recycled_buffers_are_reused() {
+        const SENDS: usize = 20;
         let rig = Rig::new(b"");
-        rig.host_video.send_to(b"one", rig.client_addr).unwrap();
-        let SessionEvent::Video { data, .. } = rig.next() else {
-            panic!("expected video")
-        };
-        let ptr = data.as_ptr();
-        recycle_into(&rig.pool, data);
-        // The receive thread may already hold a fresh buffer for its current
-        // `recv`; the recycled one is picked up within the next two datagrams.
-        let mut reused = false;
-        for _ in 0..3 {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..SENDS {
             rig.host_video.send_to(b"next", rig.client_addr).unwrap();
             let SessionEvent::Video { data, .. } = rig.next() else {
                 panic!("expected video")
             };
-            reused |= data.as_ptr() == ptr;
+            seen.insert(data.as_ptr() as usize);
             recycle_into(&rig.pool, data);
         }
         assert!(
-            reused,
-            "the recycled buffer should have been handed out again"
+            seen.len() <= 3,
+            "{SENDS} datagrams used {} distinct buffers: recycled buffers are not being reused",
+            seen.len()
         );
     }
 
