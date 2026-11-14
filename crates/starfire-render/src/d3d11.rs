@@ -136,7 +136,10 @@ impl D3d11Renderer {
                 Height: height.max(1),
                 Format: DXGI_FORMAT_B8G8R8A8_UNORM,
                 Stereo: false.into(),
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
                 BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
                 BufferCount: 2,
                 Scaling: DXGI_SCALING_STRETCH,
@@ -309,10 +312,14 @@ unsafe fn compile_shaders(
 ) -> Result<(ID3D11VertexShader, ID3D11PixelShader), RenderError> {
     let vs_blob = compile(SHADER_HLSL, s!("VSMain"), s!("vs_5_0"))?;
     let ps_blob = compile(SHADER_HLSL, s!("PSMain"), s!("ps_5_0"))?;
-    let vs_bytes =
-        std::slice::from_raw_parts(vs_blob.GetBufferPointer() as *const u8, vs_blob.GetBufferSize());
-    let ps_bytes =
-        std::slice::from_raw_parts(ps_blob.GetBufferPointer() as *const u8, ps_blob.GetBufferSize());
+    let vs_bytes = std::slice::from_raw_parts(
+        vs_blob.GetBufferPointer() as *const u8,
+        vs_blob.GetBufferSize(),
+    );
+    let ps_bytes = std::slice::from_raw_parts(
+        ps_blob.GetBufferPointer() as *const u8,
+        ps_blob.GetBufferSize(),
+    );
     let mut vs: Option<ID3D11VertexShader> = None;
     let mut ps: Option<ID3D11PixelShader> = None;
     device

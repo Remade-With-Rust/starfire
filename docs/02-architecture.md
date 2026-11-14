@@ -32,7 +32,7 @@ UI dependency so it can be extracted to a standalone OSS repo.
 | `starfire-core` | The whole protocol core: discovery, pairing, crypto, serverinfo, applist/launch, RTSP, ENet control, RTP video/audio ingest, FEC, reassembly, input encode, session state machine. **No OS, no UI.** | `rusty_enet`, `reed-solomon-erasure`, `aes`/`aes-gcm`, `ring`, `sha2`, `rcgen`, `rustls`, `quick-xml`, async runtime |
 | `starfire-decode` | `trait VideoDecoder` + per-OS impls (VideoToolbox, Media Foundation/D3D11VA, dav1d SW). Thin `unsafe` FFI behind a safe trait. | OS frameworks, `dav1d` |
 | `starfire-render` | `trait Renderer` / present + fullscreen + HDR + pacing. Zero-copy from decode where the OS allows. | wgpu/Metal/D3D11 |
-| `starfire-audio` | `trait AudioOutput`, Opus decode, channel layout, A/V sync clock. | `opus`/`audiopus`, `cpal` |
+| `starfire-audio` | `trait AudioOutput`, Opus decode, channel layout, A/V sync clock. | `rusty-opus`, `cpal` |
 | `starfire-input` | `trait InputBackend` (XInput / IOKit-HID capture); encoding lives in core. | OS HID frameworks |
 | `app` (Dioxus) | The consumer: window, session lifecycle, settings, stats overlay. | the crates above, `dioxus` |
 

@@ -113,7 +113,11 @@ mod fixture_tests {
             }
         }
         let max_idx = indices.iter().last().copied().unwrap_or(0);
-        let parity_present: Vec<u16> = indices.iter().copied().filter(|&i| i >= data_shards).collect();
+        let parity_present: Vec<u16> = indices
+            .iter()
+            .copied()
+            .filter(|&i| i >= data_shards)
+            .collect();
         println!(
             "frame 1: data_shards={data_shards} shard_indices={}..={} count={} parity_present={:?} pkt_sizes={:?}",
             indices.iter().next().copied().unwrap_or(0),
@@ -149,7 +153,10 @@ mod fixture_tests {
                 }
             }
         }
-        assert!(shards.iter().all(|s| s.is_some()), "need all 42 real shards");
+        assert!(
+            shards.iter().all(|s| s.is_some()),
+            "need all 42 real shards"
+        );
 
         let dropped = 10usize;
         let original = shards[dropped].clone().unwrap();
@@ -194,7 +201,11 @@ mod fixture_tests {
         }
         assert!(super::fec::recover(data_shards, parity_shards, &mut shards));
         for (k, &d) in drops.iter().enumerate() {
-            assert_eq!(shards[d].as_ref().unwrap(), &originals[k], "drop {d} mismatch");
+            assert_eq!(
+                shards[d].as_ref().unwrap(),
+                &originals[k],
+                "drop {d} mismatch"
+            );
         }
     }
 
@@ -207,7 +218,11 @@ mod fixture_tests {
         let pkts = load_fixture();
         let frame1: Vec<&Vec<u8>> = pkts
             .iter()
-            .filter(|p| rtp::parse_header(p).map(|h| h.frame_index == 1).unwrap_or(false))
+            .filter(|p| {
+                rtp::parse_header(p)
+                    .map(|h| h.frame_index == 1)
+                    .unwrap_or(false)
+            })
             .collect();
 
         // Lossless reference.
@@ -233,7 +248,10 @@ mod fixture_tests {
             }
         }
         let healed = healed.expect("FEC-healed frame should still emit");
-        assert_eq!(healed.data, reference.data, "FEC-healed frame must match lossless bytes");
+        assert_eq!(
+            healed.data, reference.data,
+            "FEC-healed frame must match lossless bytes"
+        );
         assert!(healed.is_keyframe);
     }
 
@@ -271,7 +289,11 @@ mod fixture_tests {
         // NAL header (0x40 0x01 = nal_type 32).
         let d = &first.data;
         let starts_with_startcode = d.starts_with(&[0, 0, 0, 1]) || d.starts_with(&[0, 0, 1]);
-        assert!(starts_with_startcode, "frame must start with an Annex-B start code: {:02x?}", &d[..8.min(d.len())]);
+        assert!(
+            starts_with_startcode,
+            "frame must start with an Annex-B start code: {:02x?}",
+            &d[..8.min(d.len())]
+        );
         assert!(
             d.windows(2).any(|w| w == [0x40, 0x01]),
             "IDR must contain a VPS NAL (40 01)"

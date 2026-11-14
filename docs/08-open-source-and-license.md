@@ -25,7 +25,7 @@
 |------|-------|---------|
 | Control transport | `rusty_enet` | MIT |
 | FEC | `rusty_erasure` (kernels; our nanors-compatible matrix) | MIT/Apache |
-| Audio decode / output | `opus`/`audiopus` / `cpal` | BSD / Apache·MIT |
+| Audio decode / output | `rusty-opus` / `cpal` | BSD-3 / Apache·MIT |
 | SW video decode | `dav1d` | BSD |
 | Crypto | `aes`/`aes-gcm`, `ring`, `sha2` | permissive |
 | TLS / certs | `rcgen`, `rustls` | permissive |

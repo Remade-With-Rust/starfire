@@ -11,6 +11,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+description = "Clean-room Rust wire layer for the Sunshine/GameStream protocol: pairing crypto, XML envelopes and video FEC, shared by client and host."
+keywords = ["gamestream", "sunshine", "game-streaming", "protocol"]
+categories = ["network-programming", "game-development"]
 
 [lints]
 workspace = true

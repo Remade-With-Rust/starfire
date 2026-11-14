@@ -44,7 +44,7 @@ impl SharedDevice {
                 None,
                 None,
             )?;
-            let device = device.ok_or_else(windows::core::Error::from_win32)?;
+            let device = device.ok_or_else(windows::core::Error::from_thread)?;
             if let Ok(mt) = device.cast::<ID3D11Multithread>() {
                 let _ = mt.SetMultithreadProtected(true);
             }

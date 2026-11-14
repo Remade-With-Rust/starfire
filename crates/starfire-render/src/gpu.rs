@@ -42,39 +42,38 @@ impl YuvPipeline {
             source: wgpu::ShaderSource::Wgsl(include_str!("yuv.wgsl").into()),
         });
 
-        let bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("yuv-bind-layout"),
-                entries: &[
-                    // sampler
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("yuv-bind-layout"),
+            entries: &[
+                // sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // y / u / v textures
+                tex_entry(1),
+                tex_entry(2),
+                tex_entry(3),
+                // params uniform
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    // y / u / v textures
-                    tex_entry(1),
-                    tex_entry(2),
-                    tex_entry(3),
-                    // params uniform
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 4,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
-            });
+                    count: None,
+                },
+            ],
+        });
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("yuv-pipeline-layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -102,7 +101,7 @@ impl YuvPipeline {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -346,6 +345,7 @@ impl YuvPipeline {
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
@@ -369,13 +369,14 @@ fn tex_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 
 /// Request a wgpu device/queue with no surface (headless). Used by the offscreen
 /// test and as the basis for the windowed renderer.
-pub fn request_headless_device() -> Result<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue), RenderError>
-{
+pub fn request_headless_device(
+) -> Result<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue), RenderError> {
     let instance = wgpu::Instance::default();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         force_fallback_adapter: false,
         compatible_surface: None,
+        apply_limit_buckets: false,
     }))
     .map_err(|e| RenderError::Failed(format!("no suitable GPU adapter: {e}")))?;
 
@@ -419,8 +420,9 @@ pub fn render_to_rgba(
     });
     let view = target.create_view(&wgpu::TextureViewDescriptor::default());
 
-    let mut encoder =
-        device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("offscreen") });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("offscreen"),
+    });
     pipeline.draw(device, queue, &mut encoder, &view, frame)?;
 
     // Copy the target into a buffer; wgpu requires bytes_per_row aligned to 256.
@@ -469,7 +471,9 @@ pub fn render_to_rgba(
         .map_err(|_| RenderError::Failed("readback channel closed".into()))?
         .map_err(|e| RenderError::Failed(format!("buffer map failed: {e:?}")))?;
 
-    let mapped = slice.get_mapped_range();
+    let mapped = slice
+        .get_mapped_range()
+        .map_err(|e| RenderError::Failed(format!("map readback range: {e:?}")))?;
     let mut out = Vec::with_capacity(unpadded * out_h as usize);
     for row in 0..out_h as usize {
         let start = row * padded;

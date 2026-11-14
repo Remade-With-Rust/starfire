@@ -29,7 +29,7 @@ A/V sync ─► cpal output
 
 ## 3. Opus decode
 
-- Crate: **`opus`/`audiopus`** (BSD). Decoder configured from the SDP audio config
+- Crate: **`rusty-opus`** (pure Rust, BSD-3). Decoder configured from the SDP audio config
   (§05): sample rate (48 kHz), channel count, frame size.
 - Handle packet loss with Opus PLC (packet-loss concealment) when a packet is
   truly lost and FEC can't recover it.

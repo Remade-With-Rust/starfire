@@ -113,7 +113,10 @@ fn main() {
 
     println!("===== {label} (wire capture) =====");
     if packets == 0 {
-        println!("NO VIDEO PACKETS found (datalink {} — check capture)", file.datalink);
+        println!(
+            "NO VIDEO PACKETS found (datalink {} — check capture)",
+            file.datalink
+        );
         return;
     }
     println!("duration (RTP)  : {dur:.1} s");
@@ -122,6 +125,9 @@ fn main() {
         "host latency    : median {host_med:.1} ms / avg {host_avg:.1} ms   (encoder, from frame header)"
     );
     println!("video bitrate   : {mbps:.1} Mbps");
-    println!("video packets   : {packets}   ({:.0}/s)", packets as f64 / dur);
+    println!(
+        "video packets   : {packets}   ({:.0}/s)",
+        packets as f64 / dur
+    );
     println!("dropped frames  : {dropped}   ({drop_pct:.2}%)");
 }

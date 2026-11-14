@@ -604,7 +604,9 @@ mod tests {
         // Fresh client (CSeq restarts) for the real handshake.
         let mut rtsp =
             RtspClient::new(&session.rtsp_url, Duration::from_secs(10)).expect("client2");
-        let rs = rtsp.handshake(&crate::rtsp::AnnounceConfig::default()).expect("rtsp handshake");
+        let rs = rtsp
+            .handshake(&crate::rtsp::AnnounceConfig::default())
+            .expect("rtsp handshake");
         println!("session: {rs:?}");
         assert_eq!(rs.ports.video_port, 47998);
         assert_eq!(rs.ports.audio_port, 48000);
@@ -633,7 +635,9 @@ mod tests {
             .launch(&desktop.id, &LaunchConfig::default())
             .expect("launch");
         let mut rtsp = RtspClient::new(&session.rtsp_url, Duration::from_secs(10)).expect("client");
-        let rs = rtsp.handshake(&crate::rtsp::AnnounceConfig::default()).expect("handshake");
+        let rs = rtsp
+            .handshake(&crate::rtsp::AnnounceConfig::default())
+            .expect("handshake");
         println!(
             "SESSION HELD: video={} control={} audio={} — holding 25s",
             rs.ports.video_port, rs.ports.control_port, rs.ports.audio_port
@@ -685,7 +689,9 @@ mod tests {
             .launch(&desktop.id, &LaunchConfig::default())
             .expect("launch");
         let mut rtsp = RtspClient::new(&session.rtsp_url, Duration::from_secs(10)).expect("client");
-        let rs = rtsp.handshake(&crate::rtsp::AnnounceConfig::default()).expect("handshake");
+        let rs = rtsp
+            .handshake(&crate::rtsp::AnnounceConfig::default())
+            .expect("handshake");
         println!(
             "host={host} video={} audio={} control={}",
             rs.ports.video_port, rs.ports.audio_port, rs.ports.control_port
@@ -731,7 +737,8 @@ mod tests {
 
         // Optionally dump received datagrams (u16-LE length prefix + bytes) to a
         // fixture for offline depacketizer development. Capped so it stays small.
-        let mut fixture: Option<Vec<u8>> = std::env::var("SF_VIDEO_FIXTURE").ok().map(|_| Vec::new());
+        let mut fixture: Option<Vec<u8>> =
+            std::env::var("SF_VIDEO_FIXTURE").ok().map(|_| Vec::new());
 
         let mut buf = [0u8; 2048];
         let (mut got, mut hevc, mut bytes) = (0usize, false, 0usize);
@@ -791,7 +798,9 @@ mod tests {
             .launch(&desktop.id, &LaunchConfig::default())
             .expect("launch");
         let mut rtsp = RtspClient::new(&session.rtsp_url, Duration::from_secs(10)).expect("client");
-        let rs = rtsp.handshake(&crate::rtsp::AnnounceConfig::default()).expect("handshake");
+        let rs = rtsp
+            .handshake(&crate::rtsp::AnnounceConfig::default())
+            .expect("handshake");
         println!(
             "control_port={} connect_data={} ping_payload={:02x?}",
             rs.ports.control_port, rs.control_connect_data, rs.ping_payload

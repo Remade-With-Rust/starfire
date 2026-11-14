@@ -5,7 +5,7 @@
 
 use starfire_core::video::Codec;
 
-use crate::{Decoder, DecodeError, DecodedFrame, VideoDecoder};
+use crate::{DecodeError, DecodedFrame, Decoder, VideoDecoder};
 
 /// Whether to prefer hardware decode (the default; SW is fallback only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

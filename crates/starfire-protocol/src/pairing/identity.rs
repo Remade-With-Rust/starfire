@@ -97,4 +97,27 @@ mod tests {
         assert_ne!(a.unique_id, b.unique_id);
         assert_ne!(a.cert_pem, b.cert_pem);
     }
+
+    /// The pairing signature must verify against the public key in our own
+    /// cert — the check Sunshine (OpenSSL) runs. Guards the DER encoding and
+    /// the key/cert pairing across p256 upgrades.
+    #[test]
+    fn signature_verifies_against_own_cert() {
+        use p256::ecdsa::signature::Verifier;
+        use p256::ecdsa::{DerSignature, VerifyingKey};
+        use x509_parser::prelude::FromDer;
+
+        let id = ClientIdentity::generate("starfire-test").unwrap();
+        let msg = b"pairing secret || signature";
+        let der_sig = id.sign(msg).unwrap();
+
+        let (_, pem) = x509_parser::pem::parse_x509_pem(id.cert_pem.as_bytes()).unwrap();
+        let (_, cert) = x509_parser::certificate::X509Certificate::from_der(&pem.contents).unwrap();
+        let spki = cert.public_key().subject_public_key.data.as_ref();
+        let vk = VerifyingKey::from_sec1_bytes(spki).unwrap();
+
+        let sig = DerSignature::try_from(der_sig.as_slice()).unwrap();
+        vk.verify(msg, &sig).unwrap();
+        assert!(vk.verify(b"tampered", &sig).is_err());
+    }
 }

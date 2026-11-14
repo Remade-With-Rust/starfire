@@ -86,7 +86,10 @@ pub fn decode_mouse_rel(msg: &[u8]) -> Option<(i16, i16)> {
     if m[..10] != MOUSE_REL_HEADER {
         return None;
     }
-    Some((i16::from_be_bytes([m[10], m[11]]), i16::from_be_bytes([m[12], m[13]])))
+    Some((
+        i16::from_be_bytes([m[10], m[11]]),
+        i16::from_be_bytes([m[12], m[13]]),
+    ))
 }
 
 /// The fixed first 10 bytes of every relative-mouse-move message: type (LE),
@@ -129,7 +132,11 @@ pub fn mouse_move_abs(x: i16, y: i16, width: i16, height: i16) -> Vec<u8> {
 
 /// Mouse button press/release.
 pub fn mouse_button(button: MouseButton, down: bool) -> Vec<u8> {
-    let magic = if down { MAGIC_MOUSE_BTN_DOWN } else { MAGIC_MOUSE_BTN_UP };
+    let magic = if down {
+        MAGIC_MOUSE_BTN_DOWN
+    } else {
+        MAGIC_MOUSE_BTN_UP
+    };
     frame(magic, &[button as u8])
 }
 
