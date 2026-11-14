@@ -35,7 +35,7 @@ impl CpalPlayer {
 
         let config = cpal::StreamConfig {
             channels: CHANNELS as u16,
-            sample_rate: cpal::SampleRate(SAMPLE_RATE),
+            sample_rate: SAMPLE_RATE,
             buffer_size: cpal::BufferSize::Default,
         };
         let cap = SAMPLE_RATE as usize * CHANNELS * MAX_BUFFER_MS / 1000;
@@ -44,7 +44,7 @@ impl CpalPlayer {
         let ring_cb = ring.clone();
         let stream = device
             .build_output_stream(
-                &config,
+                config,
                 move |out: &mut [f32], _| {
                     let mut q = match ring_cb.lock() {
                         Ok(q) => q,

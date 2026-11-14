@@ -77,7 +77,7 @@ use windows::Win32::Media::MediaFoundation::{
 use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED};
 
 use crate::frame::{ColorSpace, PixelFormat, Plane, VideoFrame};
-use crate::{Decoder, DecodeError};
+use crate::{DecodeError, Decoder};
 
 /// Pack two u32s into the UINT64 form MF uses for `MF_MT_FRAME_SIZE` (hi ‖ lo).
 fn packed(hi: u32, lo: u32) -> u64 {
@@ -188,7 +188,8 @@ impl MediaFoundationDecoder {
 
             // Hand it the D3D manager to enable DXVA hardware decode (best-effort:
             // if it declines, it falls back to software but still decodes).
-            let _ = transform.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize);
+            let _ =
+                transform.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize);
 
             // Ask for output textures a shader can sample, so frames can be
             // presented straight from the decoder's texture with no copy. Best
@@ -257,10 +258,7 @@ impl MediaFoundationDecoder {
             if !buffered {
                 if let Ok(codec_api) = transform.cast::<ICodecAPI>() {
                     low_latency |= codec_api
-                        .SetValue(
-                            &CODECAPI_AVLowLatencyMode,
-                            &windows::core::VARIANT::from(true),
-                        )
+                        .SetValue(&CODECAPI_AVLowLatencyMode, &variant_bool(true))
                         .is_ok();
                 }
                 if let Ok(attrs) = transform.GetAttributes() {
@@ -284,7 +282,9 @@ impl MediaFoundationDecoder {
             in_type
                 .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
                 .map_err(mferr)?;
-            in_type.SetGUID(&MF_MT_SUBTYPE, &in_subtype).map_err(mferr)?;
+            in_type
+                .SetGUID(&MF_MT_SUBTYPE, &in_subtype)
+                .map_err(mferr)?;
             in_type
                 .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
                 .map_err(mferr)?;
@@ -416,7 +416,10 @@ impl MediaFoundationDecoder {
             MipLevels: 1,
             ArraySize: 1,
             Format: DXGI_FORMAT_NV12,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
             Usage: D3D11_USAGE_DEFAULT,
             BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
             CPUAccessFlags: 0,
@@ -445,9 +448,12 @@ impl MediaFoundationDecoder {
         let buffer = sample.GetBufferByIndex(0).map_err(mferr)?;
         let dxgi: IMFDXGIBuffer = buffer.cast().map_err(mferr)?;
         let mut raw: *mut c_void = std::ptr::null_mut();
-        dxgi.GetResource(&ID3D11Texture2D::IID, &mut raw).map_err(mferr)?;
+        dxgi.GetResource(&ID3D11Texture2D::IID, &mut raw)
+            .map_err(mferr)?;
         if raw.is_null() {
-            return Err(DecodeError::Failed("MFT output is not a D3D11 texture".into()));
+            return Err(DecodeError::Failed(
+                "MFT output is not a D3D11 texture".into(),
+            ));
         }
         let src = ID3D11Texture2D::from_raw(raw);
         let subresource = dxgi.GetSubresourceIndex().map_err(mferr)?;
@@ -570,12 +576,12 @@ impl MediaFoundationDecoder {
         );
         self.context.End(query);
         self.context.Flush();
-        let mut done = windows::Win32::Foundation::BOOL(0);
+        let mut done = windows::core::BOOL(0);
         loop {
             let _ = self.context.GetData(
                 query,
-                Some(&mut done as *mut windows::Win32::Foundation::BOOL as *mut c_void),
-                std::mem::size_of::<windows::Win32::Foundation::BOOL>() as u32,
+                Some(&mut done as *mut windows::core::BOOL as *mut c_void),
+                std::mem::size_of::<windows::core::BOOL>() as u32,
                 0,
             );
             if done.as_bool() {
@@ -627,7 +633,9 @@ impl Decoder for MediaFoundationDecoder {
             // A sync MFT may refuse input while output is pending — drain, then feed.
             if let Err(e) = self.transform.ProcessInput(0, &sample, 0) {
                 self.drain_output()?;
-                self.transform.ProcessInput(0, &sample, 0).map_err(|_| mferr(e))?;
+                self.transform
+                    .ProcessInput(0, &sample, 0)
+                    .map_err(|_| mferr(e))?;
             }
         }
         self.drain_output()?;
@@ -743,6 +751,28 @@ unsafe fn activate_decoder(subtype: GUID) -> Option<(IMFTransform, GUID)> {
         }
     }
     None
+}
+
+/// A `VT_BOOL` VARIANT (windows 0.62 no longer ships `VARIANT::from(bool)`).
+/// Plain data: a BOOL variant owns nothing, so it needs no `VariantClear`.
+fn variant_bool(value: bool) -> windows::Win32::System::Variant::VARIANT {
+    use std::mem::ManuallyDrop;
+    use windows::Win32::System::Variant::{
+        VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_BOOL,
+    };
+    VARIANT {
+        Anonymous: VARIANT_0 {
+            Anonymous: ManuallyDrop::new(VARIANT_0_0 {
+                vt: VT_BOOL,
+                wReserved1: 0,
+                wReserved2: 0,
+                wReserved3: 0,
+                Anonymous: VARIANT_0_0_0 {
+                    boolVal: value.into(),
+                },
+            }),
+        },
+    }
 }
 
 #[cfg(test)]

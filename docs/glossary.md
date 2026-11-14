@@ -23,7 +23,7 @@
 | **OBU** | Open Bitstream Unit — AV1's packetization unit. |
 | **NAL** | Network Abstraction Layer unit — HEVC/H.264's packetization unit. |
 | **IDR** | Instantaneous Decoder Refresh — a clean keyframe; we request one on unrecoverable loss. |
-| **Opus** | The audio codec; decoded via `opus`/`audiopus` (BSD). |
+| **Opus** | The audio codec; decoded via `rusty-opus` (pure Rust, BSD-3). |
 | **ABR** | Adaptive Bitrate — client feedback to the host to adjust encode bitrate. |
 | **VideoToolbox** | macOS hardware decode/present framework. |
 | **Media Foundation / D3D11VA** | Windows hardware decode frameworks. |

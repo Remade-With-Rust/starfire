@@ -16,9 +16,11 @@ thiserror = { workspace = true }
 # Windows hardware HEVC decode via Media Foundation (the async hardware decoder
 # MFT + D3D11). MIT/Apache `windows` crate — no proprietary SDK, no ffmpeg.
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
     "Win32_Media_MediaFoundation",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",

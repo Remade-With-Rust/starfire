@@ -76,7 +76,7 @@ impl VideoRenderer {
     /// (which satisfies wgpu's `'static` surface requirement).
     pub fn new<W>(window: W, width: u32, height: u32) -> Result<Self, RenderError>
     where
-        W: wgpu::WindowHandle + 'static,
+        W: wgpu::DisplayAndWindowHandle + 'static,
     {
         let instance = wgpu::Instance::default();
         let surface = instance
@@ -87,19 +87,19 @@ impl VideoRenderer {
             power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
             compatible_surface: Some(&surface),
+            apply_limit_buckets: false,
         }))
         .map_err(|e| RenderError::Failed(format!("no GPU adapter: {e}")))?;
 
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("starfire-render"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
-                experimental_features: wgpu::ExperimentalFeatures::default(),
-                memory_hints: wgpu::MemoryHints::Performance,
-                trace: wgpu::Trace::Off,
-            }))
-            .map_err(|e| RenderError::Failed(format!("request_device: {e}")))?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("starfire-render"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::downlevel_defaults(),
+            experimental_features: wgpu::ExperimentalFeatures::default(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: wgpu::Trace::Off,
+        }))
+        .map_err(|e| RenderError::Failed(format!("request_device: {e}")))?;
 
         let caps = surface.get_capabilities(&adapter);
         // Prefer an sRGB swapchain format so our linear-ish RGB output is encoded
@@ -126,6 +126,7 @@ impl VideoRenderer {
             desired_maximum_frame_latency: 1,
             alpha_mode: caps.alpha_modes[0],
             view_formats: vec![],
+            color_space: wgpu::SurfaceColorSpace::Auto,
         };
         surface.configure(&device, &config);
 
@@ -155,15 +156,21 @@ impl Renderer for VideoRenderer {
     }
 
     fn present(&mut self, frame: &VideoFrame) -> Result<(), RenderError> {
+        use wgpu::CurrentSurfaceTexture as Acquire;
         let surface_tex = match self.surface.get_current_texture() {
-            Ok(t) => t,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+            Acquire::Success(t) | Acquire::Suboptimal(t) => t,
+            Acquire::Lost | Acquire::Outdated => {
                 self.surface.configure(&self.device, &self.config);
-                self.surface
-                    .get_current_texture()
-                    .map_err(|e| RenderError::Failed(format!("acquire after reconfigure: {e}")))?
+                match self.surface.get_current_texture() {
+                    Acquire::Success(t) | Acquire::Suboptimal(t) => t,
+                    other => {
+                        return Err(RenderError::Failed(format!(
+                            "acquire after reconfigure: {other:?}"
+                        )))
+                    }
+                }
             }
-            Err(e) => return Err(RenderError::Failed(format!("acquire frame: {e}"))),
+            other => return Err(RenderError::Failed(format!("acquire frame: {other:?}"))),
         };
         let view = surface_tex
             .texture
@@ -177,7 +184,7 @@ impl Renderer for VideoRenderer {
         self.pipeline
             .draw(&self.device, &self.queue, &mut encoder, &view, frame)?;
         self.queue.submit(Some(encoder.finish()));
-        surface_tex.present();
+        self.queue.present(surface_tex);
         Ok(())
     }
 }
@@ -261,7 +268,7 @@ pub fn new_d3d11_for_window<W: winit::raw_window_handle::HasWindowHandle>(
 /// returns the `wgpu` backend, so that path is unchanged.
 pub fn new_for_window<W>(window: W, width: u32, height: u32) -> Result<ActiveRenderer, RenderError>
 where
-    W: wgpu::WindowHandle + 'static,
+    W: wgpu::DisplayAndWindowHandle + 'static,
 {
     #[cfg(target_os = "macos")]
     {

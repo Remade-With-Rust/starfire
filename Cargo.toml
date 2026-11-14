@@ -21,7 +21,7 @@ members = [
 version = "0.0.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/Ttimmahlax/starfire"
+repository = "https://github.com/Remade-With-Rust/starfire"
 rust-version = "1.95"
 
 # Shared, permissive-only dependencies. cargo-deny enforces zero GPL/LGPL.
@@ -41,7 +41,7 @@ aes-gcm = "0.10"
 rusty_xml-reader = "0.8.1"
 rcgen = "0.13"     # self-signed client identity cert (F2)
 getrandom = "0.2"  # OS randomness for salt/challenge/secret (F2)
-p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] } # sign pairing secret (F2)
+p256 = { version = "0.14", features = ["ecdsa", "pkcs8", "pem"] } # sign pairing secret (F2)
 x509-parser = "0.16" # extract X.509 cert signature bytes for the hash chain (F2)
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] } # mTLS HTTPS (F3)
 rustls-pki-types = { version = "1", features = ["std"] } # PEM cert/key parsing (F3)
@@ -55,13 +55,16 @@ rusty_alloc = "2.2.5"
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
 # render layer (permissive: wgpu/winit are MIT/Apache-2.0). docs/04.
-wgpu = "27"
-winit = "0.30"
+wgpu = "30"
+# Default features minus the Wayland title-bar font renderer (sctk-adwaita's
+# ab_glyph -> ttf-parser, unmaintained: RUSTSEC-2026-0192). Wayland windows keep
+# client-side decorations, without title text; macOS/Windows are unaffected.
+winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen", "wayland-csd-adwaita-notitle"] }
 pollster = "0.4"   # block_on for device request + headless readback
 bytemuck = { version = "1", features = ["derive"] } # POD uniform structs
-# audio layer (permissive: libopus is BSD-3, cpal is Apache-2.0). docs/protocol/08.
-audiopus = "=0.3.0-rc.0" # Opus decode (libopus via CMake on all platforms)
-cpal = "0.15"      # cross-platform audio output (CoreAudio / WASAPI)
+# audio layer (permissive: rusty-opus is BSD-3, cpal is Apache-2.0). docs/protocol/08.
+rusty-opus = "1.1.0" # Opus decode: pure Rust (RFC 6716/8251), no C or CMake
+cpal = "0.18"      # cross-platform audio output (CoreAudio / WASAPI)
 
 # Lints that encode the baseline rules from docs/01-overview.md.
 # Warn (not deny) in Phase 0 so stubs stay green; tighten to deny before Phase 1.
