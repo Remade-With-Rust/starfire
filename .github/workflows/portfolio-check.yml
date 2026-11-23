@@ -24,3 +24,4 @@ jobs:
     uses: Remade-With-Rust/.github/.github/workflows/portfolio-test.yml@main
     with:
       command: test
+      apt-packages: libasound2-dev pkg-config
