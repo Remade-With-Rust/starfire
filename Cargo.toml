@@ -63,7 +63,7 @@ winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11
 pollster = "0.4"   # block_on for device request + headless readback
 bytemuck = { version = "1", features = ["derive"] } # POD uniform structs
 # audio layer (permissive: rusty-opus is BSD-3, cpal is Apache-2.0). docs/protocol/08.
-rusty-opus = "1.1.0" # Opus decode: pure Rust (RFC 6716/8251), no C or CMake
+rusty-opus = "1.2.1" # Opus decode: pure Rust (RFC 6716/8251), no C or CMake
 cpal = "0.18"      # cross-platform audio output (CoreAudio / WASAPI)
 
 # Lints that encode the baseline rules from docs/01-overview.md.
