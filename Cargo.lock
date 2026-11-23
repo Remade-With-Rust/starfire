@@ -330,6 +330,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "castaway"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dec551ab6e7578819132c713a93c022a05d60159dc86e7a7050223577484c55a"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.64"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -388,6 +397,19 @@ checksum = "ba5a308b75df32fe02788e748662718f03fde005016435c444eea572398219fd"
 dependencies = [
  "bytes",
  "memchr",
+]
+
+[[package]]
+name = "compact_str"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "79fcda08c33bb58b97008b2cdada6622500e949e060f5913361763121abd2416"
+dependencies = [
+ "castaway",
+ "cfg-if",
+ "itoa",
+ "static_assertions",
+ "zmij",
 ]
 
 [[package]]
@@ -1033,6 +1055,12 @@ checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
  "generic-array",
 ]
+
+[[package]]
+name = "itoa"
+version = "1.0.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
 name = "jni"
@@ -2202,15 +2230,15 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
 name = "rusty-opus"
-version = "1.1.0"
+version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d71ff9c55e89cdfaf1a67c6130de98c45f4c711e922ca613f025d90b19b10f2"
+checksum = "3255d1fe9772031f725ddb6207044332972ce62ec16f838fc41eeace8983fba8"
 
 [[package]]
 name = "rusty_alloc"
-version = "2.2.5"
+version = "2.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c12ed1752127ac2fabc5bc5aed934055f4be5f093885d830a66686bff4cd7668"
+checksum = "fbc3c5d570c6a698fe1329b5abfbadeb3993723dc06af6c0dad541b2a34e1ff9"
 dependencies = [
  "libc",
  "portable-atomic",
@@ -2219,9 +2247,9 @@ dependencies = [
 
 [[package]]
 name = "rusty_alloc-api"
-version = "2.2.5"
+version = "2.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a68d299fc4818e1b26164556504f28240de294ea709c519ec465add9238f30f7"
+checksum = "99a38e4517642f7c2123e8a27200b15f06d763b59ab7a33d57a2f82dd958e66d"
 dependencies = [
  "rusty_alloc",
 ]
@@ -2237,9 +2265,9 @@ dependencies = [
 
 [[package]]
 name = "rusty_erasure"
-version = "0.4.1"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7e15f06f248d5ad95750326fa0e66f2c6bf214fac258ad3a6024299e52355334"
+checksum = "0ceb298ce330b115134a506cf169e00e66d88aece88a8e39b643c54bf3307a36"
 dependencies = [
  "rusty_erasure-accel",
  "rusty_erasure-core",
@@ -2247,24 +2275,24 @@ dependencies = [
 
 [[package]]
 name = "rusty_erasure-accel"
-version = "0.4.1"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e464cb9dc52f251c847210e5d781feeaff14315f2560ffd84b9393350a8fb3d"
+checksum = "d6dddfbd59f9c93d4cba7d06278d15f9bd400133e9e63926a46b192ec92b183c"
 dependencies = [
  "rusty_erasure-core",
 ]
 
 [[package]]
 name = "rusty_erasure-core"
-version = "0.4.1"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61c237be51374ef0b897e4a9205966b9941ce89d063e6e5d63bf96d8611580dc"
+checksum = "f6ba9c57bfcab8ed6b8476e8076724e72d9473bae72952aed175f98e97a27f07"
 
 [[package]]
 name = "rusty_xml-parser"
-version = "0.8.5"
+version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0badeb1b88267fcb37dc666672624764dd539de0665bfecf2ee106a782a1def7"
+checksum = "c783519ea7a90141d44dc8b9ea93a7b96b26ae524ffa0c7e0f6a4a8d8aea4164"
 dependencies = [
  "rusty_xml-sax",
  "rusty_xml-tree",
@@ -2272,9 +2300,9 @@ dependencies = [
 
 [[package]]
 name = "rusty_xml-reader"
-version = "0.8.5"
+version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adcca0cf43c17f1196586554f8a9e8e5f96d64915c076ec02878e08a6628333e"
+checksum = "a958fc88aba53a88944d6af3525e7d6bf3e3b8d096d6f5f8cd9fedd306eb2347"
 dependencies = [
  "rusty_xml-parser",
  "rusty_xml-tree",
@@ -2282,15 +2310,18 @@ dependencies = [
 
 [[package]]
 name = "rusty_xml-sax"
-version = "0.8.5"
+version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "763ed3ed5d0a6e9a8ae19391460de0674dac79ee9e6da526353825e1feea6a8d"
+checksum = "7919b6798f51c4dcce5630d563dab40f0cc8762b143d2a614340dd33d5f7df43"
 
 [[package]]
 name = "rusty_xml-tree"
-version = "0.8.5"
+version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "810758c2b1f2e476c5cc2a6c7fe92979b2a053f878e46c9d421255761290629e"
+checksum = "23ee0a1b3118a863a2e1ac424774042da8e750aaac5303e59a3fd8a0aaaa013d"
+dependencies = [
+ "compact_str",
+]
 
 [[package]]
 name = "same-file"
@@ -3830,3 +3861,9 @@ name = "zeroize"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
+
+[[package]]
+name = "zmij"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
