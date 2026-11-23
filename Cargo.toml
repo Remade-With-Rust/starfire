@@ -49,7 +49,7 @@ rusty_enet = "0.4" # reliable-UDP control channel (F6)
 socket2 = "0.6"    # socket options std lacks: a large SO_RCVBUF on the media sockets
 # Global allocator: rusty_alloc (pure-Rust mimalloc remake). Only starfire-alloc
 # may depend on these; deliverables depend on starfire-alloc. 2.2.5 is a floor.
-rusty_alloc-api = "2.2.5"
+rusty_alloc-api = "2.6.0"
 rusty_alloc = "2.6.0"
 # test support
 toml = "0.8"
