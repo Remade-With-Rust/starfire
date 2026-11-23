@@ -2564,7 +2564,7 @@ dependencies = [
 
 [[package]]
 name = "starfire-alloc"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "rusty_alloc",
  "rusty_alloc-api",
@@ -2572,7 +2572,7 @@ dependencies = [
 
 [[package]]
 name = "starfire-app"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "starfire-alloc",
  "starfire-audio",
@@ -2586,7 +2586,7 @@ dependencies = [
 
 [[package]]
 name = "starfire-audio"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "cpal",
  "rusty-opus",
@@ -2596,7 +2596,7 @@ dependencies = [
 
 [[package]]
 name = "starfire-client"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "starfire-core",
  "starfire-decode",
@@ -2605,7 +2605,7 @@ dependencies = [
 
 [[package]]
 name = "starfire-core"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -2627,7 +2627,7 @@ dependencies = [
 
 [[package]]
 name = "starfire-decode"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "starfire-core",
  "thiserror 2.0.18",
@@ -2636,14 +2636,14 @@ dependencies = [
 
 [[package]]
 name = "starfire-fixture-slicer"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "starfire-testkit",
 ]
 
 [[package]]
 name = "starfire-input"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "starfire-core",
  "thiserror 2.0.18",
@@ -2651,7 +2651,7 @@ dependencies = [
 
 [[package]]
 name = "starfire-protocol"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "aes",
  "getrandom 0.2.17",
@@ -2666,7 +2666,7 @@ dependencies = [
 
 [[package]]
 name = "starfire-render"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "bytemuck",
  "pollster",
@@ -2679,11 +2679,11 @@ dependencies = [
 
 [[package]]
 name = "starfire-rt"
-version = "0.0.0"
+version = "0.0.1"
 
 [[package]]
 name = "starfire-testkit"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
