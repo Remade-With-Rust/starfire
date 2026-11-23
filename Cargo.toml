@@ -31,7 +31,7 @@ tracing = "0.1"
 # protocol-core libs (added to crates as their layers land)
 # Video FEC kernels: ISA-L remade in Rust (SIMD to GFNI/NEON, no C). The nanors-
 # compatible Cauchy matrix is supplied by starfire-protocol::fec.
-rusty_erasure = "0.4.1"
+rusty_erasure = "0.4.4"
 sha2 = "0.10"
 aes = "0.8"
 aes-gcm = "0.10"
